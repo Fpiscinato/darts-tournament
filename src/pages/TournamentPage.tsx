@@ -53,7 +53,18 @@ export function TournamentPage() {
 
   const stagesPresent = Array.from(new Set(matches.map((m) => m.stage))) as Stage[]
   const stageOrder: Stage[] = ["league", "top4", "knockout", "final"]
-  const orderedStages = stageOrder.filter((s) => stagesPresent.includes(s))
+  const naturalStages = stageOrder.filter((s) => stagesPresent.includes(s))
+
+  // Whichever stage still has work to do floats to the top; stages that are
+  // fully confirmed sink toward the bottom — same idea as the round
+  // ordering inside MatchList, applied one level up so a finished League
+  // table doesn't sit above the Top 4 / Final you're actually playing.
+  const stageDone = (stage: Stage) => matches.filter((m) => m.stage === stage).every((m) => m.status === "completed")
+  const orderedStages = [...naturalStages].sort((a, b) => {
+    const aDone = stageDone(a) ? 1 : 0
+    const bDone = stageDone(b) ? 1 : 0
+    return aDone - bDone || naturalStages.indexOf(a) - naturalStages.indexOf(b)
+  })
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6">
@@ -127,10 +138,14 @@ export function TournamentPage() {
           )
           const isRoundRobin = stage === "league" || (stage === "top4" && tournament.finalsFormat === "top4_round_robin")
           const isBracket = stage === "knockout"
+          const done = stageDone(stage)
 
           return (
-            <section key={stage}>
-              <h2 className="mb-2 text-lg font-medium">{STAGE_LABEL[stage]}</h2>
+            <section key={stage} className={done ? "opacity-70" : undefined}>
+              <h2 className="mb-2 text-lg font-medium">
+                {STAGE_LABEL[stage]}
+                {done && <span className="ml-2 text-sm font-normal text-muted-foreground">· done</span>}
+              </h2>
               {isRoundRobin && <StandingsTable playerIds={stagePlayerIds} matches={stageMatches} />}
               {isBracket && <BracketView matches={stageMatches} onSelectMatch={setSelectedMatchId} />}
               {(isRoundRobin || stage === "final") && (
