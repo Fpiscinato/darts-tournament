@@ -4,15 +4,7 @@ import type { Match } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
-
-const ROUND_ACCENTS = [
-  "border-l-violet-500",
-  "border-l-sky-500",
-  "border-l-amber-500",
-  "border-l-emerald-500",
-  "border-l-rose-500",
-  "border-l-cyan-500",
-]
+import { ROUND_BORDER_CLASSES } from "@/lib/roundColors"
 
 function MatchRow({ match, onSelect }: { match: Match; onSelect: (id: string) => void }) {
   const p1 = useLiveQuery(() => (match.player1Id ? db.players.get(match.player1Id) : undefined), [match.player1Id])
@@ -43,29 +35,50 @@ function MatchRow({ match, onSelect }: { match: Match; onSelect: (id: string) =>
   )
 }
 
+/** Groups matches by round, colored consistently with the Knockout bracket.
+ * Rounds that still have work to do float to the top; rounds where every
+ * match is confirmed sink toward the bottom — same within each round, so
+ * the organiser never has to scroll past finished matches to find the next
+ * one to score. */
 export function MatchList({ matches, onSelect, title }: { matches: Match[]; onSelect: (id: string) => void; title?: string }) {
-  const rounds = Array.from(new Set(matches.map((m) => m.round))).sort((a, b) => a - b)
-  const multiRound = rounds.length > 1
+  const roundNumbers = Array.from(new Set(matches.map((m) => m.round))).sort((a, b) => a - b)
+  const multiRound = roundNumbers.length > 1
+
+  const rounds = roundNumbers.map((round) => {
+    const roundMatches = [...matches.filter((m) => m.round === round)].sort((a, b) => {
+      const aDone = a.status === "completed" ? 1 : 0
+      const bDone = b.status === "completed" ? 1 : 0
+      return aDone - bDone || a.bracketPosition - b.bracketPosition
+    })
+    const allDone = roundMatches.every((m) => m.status === "completed")
+    return { round, roundMatches, allDone }
+  })
+
+  const ordered = [...rounds].sort((a, b) => {
+    const aDone = a.allDone ? 1 : 0
+    const bDone = b.allDone ? 1 : 0
+    return aDone - bDone || a.round - b.round
+  })
 
   return (
     <div>
       {title && <h3 className="mb-2 text-sm font-medium text-muted-foreground">{title}</h3>}
       <div className="flex flex-col gap-4">
-        {rounds.map((round, i) => {
-          const roundMatches = matches
-            .filter((m) => m.round === round)
-            .sort((a, b) => a.bracketPosition - b.bracketPosition)
+        {ordered.map(({ round, roundMatches, allDone }) => {
+          const colorIndex = roundNumbers.indexOf(round) % ROUND_BORDER_CLASSES.length
           return (
             <div
               key={round}
               className={cn(
                 "rounded-lg border border-border bg-muted/30 p-3",
-                multiRound && `border-l-4 ${ROUND_ACCENTS[i % ROUND_ACCENTS.length]}`,
+                allDone && "opacity-70",
+                multiRound && `border-l-4 ${ROUND_BORDER_CLASSES[colorIndex]}`,
               )}
             >
               {multiRound && (
                 <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Round {round}
+                  {allDone && " · done"}
                 </div>
               )}
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">

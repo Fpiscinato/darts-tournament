@@ -1,8 +1,11 @@
 import { useLiveQuery } from "dexie-react-hooks"
 import { db } from "@/lib/db"
 import { roundName } from "@/lib/knockout"
+import { ROUND_BADGE_CLASSES, ROUND_LINE_CLASSES } from "@/lib/roundColors"
 import type { Match } from "@/lib/types"
-import { Badge } from "@/components/ui/badge"
+import { cn } from "@/lib/utils"
+
+const BOX_HEIGHT = "h-[70px]"
 
 function MatchBox({ match, onSelect }: { match: Match; onSelect?: (id: string) => void }) {
   const p1 = useLiveQuery(() => (match.player1Id ? db.players.get(match.player1Id) : undefined), [match.player1Id])
@@ -16,20 +19,40 @@ function MatchBox({ match, onSelect }: { match: Match; onSelect?: (id: string) =
       type="button"
       disabled={!clickable}
       onClick={() => match.player1Id && match.player2Id && onSelect?.(match.id)}
-      className={`flex w-48 flex-col gap-1 rounded-md border border-border px-3 py-2 text-left text-sm ${
-        clickable ? "hover:bg-muted" : ""
-      } ${match.status === "completed" ? "opacity-80" : ""}`}
+      className={cn(
+        "flex w-48 flex-col justify-center gap-1 rounded-md border border-border bg-card px-3 py-2 text-left text-sm shadow-sm",
+        BOX_HEIGHT,
+        clickable && "hover:border-primary hover:bg-muted",
+        match.status === "completed" && "opacity-80",
+      )}
     >
-      <div className={`flex justify-between ${match.winnerId === match.player1Id ? "font-semibold" : ""}`}>
-        <span className="truncate">{p1?.name ?? (match.player1Id ? "…" : "TBD")}</span>
+      <div className={cn("flex justify-between", match.winnerId === match.player1Id && "font-semibold")}>
+        <span className="truncate">
+          {p1?.name ?? (match.player1Id ? "…" : "TBD")}
+          {isBye && match.player1Id && <span className="ml-1 text-xs font-normal text-muted-foreground">(bye)</span>}
+        </span>
         {match.status === "completed" && !isBye && <span className="tabular-nums">{match.player1Legs}</span>}
       </div>
-      <div className={`flex justify-between ${match.winnerId === match.player2Id ? "font-semibold" : ""}`}>
-        <span className="truncate">{p2?.name ?? (match.player2Id ? "…" : "TBD")}</span>
+      <div className={cn("flex justify-between", match.winnerId === match.player2Id && "font-semibold")}>
+        <span className="truncate">
+          {p2?.name ?? (match.player2Id ? "…" : "TBD")}
+          {isBye && match.player2Id && <span className="ml-1 text-xs font-normal text-muted-foreground">(bye)</span>}
+        </span>
         {match.status === "completed" && !isBye && <span className="tabular-nums">{match.player2Legs}</span>}
       </div>
-      {isBye && <span className="text-xs text-muted-foreground">Bye — auto-advanced</span>}
     </button>
+  )
+}
+
+/** Elbow connector linking a pair of round-N matches to the round-N+1 match
+ * they feed into: a CSS-only bracket line (no SVG/measurement needed) using
+ * top/bottom borders on two stacked halves. */
+function Connector({ colorClass }: { colorClass: string }) {
+  return (
+    <div className="flex w-6 flex-1 flex-col">
+      <div className={cn("flex-1 border-r-2 border-b-2 rounded-br", colorClass)} />
+      <div className={cn("flex-1 border-r-2 border-t-2 rounded-tr", colorClass)} />
+    </div>
   )
 }
 
@@ -44,19 +67,39 @@ export function BracketView({
   const total = rounds.length
 
   return (
-    <div className="flex gap-8 overflow-x-auto pb-4">
-      {rounds.map((round) => {
+    <div className="flex items-stretch gap-0 overflow-x-auto pb-4">
+      {rounds.map((round, roundIndex) => {
         const roundMatches = matches.filter((m) => m.round === round).sort((a, b) => a.bracketPosition - b.bracketPosition)
+        const isLast = roundIndex === rounds.length - 1
+        const lineColor = ROUND_LINE_CLASSES[roundIndex % ROUND_LINE_CLASSES.length]
+
         return (
-          <div key={round} className="flex flex-col justify-around gap-6">
-            <Badge variant="outline" className="mb-2 w-fit">
-              {roundName(round, total)}
-            </Badge>
-            <div className="flex flex-col justify-around gap-6">
-              {roundMatches.map((m) => (
-                <MatchBox key={m.id} match={m} onSelect={onSelectMatch} />
-              ))}
+          <div key={round} className="flex shrink-0 items-stretch">
+            <div className="flex flex-col gap-2 pr-2">
+              <span
+                className={cn(
+                  "mb-1 w-fit rounded-full border px-2 py-0.5 text-xs font-semibold",
+                  ROUND_BADGE_CLASSES[roundIndex % ROUND_BADGE_CLASSES.length],
+                )}
+              >
+                {roundName(round, total)}
+              </span>
+              <div className="flex flex-1 flex-col justify-around gap-4">
+                {roundMatches.map((m) => (
+                  <MatchBox key={m.id} match={m} onSelect={onSelectMatch} />
+                ))}
+              </div>
             </div>
+
+            {!isLast && (
+              <div className="mt-7 flex flex-col justify-around gap-4">
+                {Array.from({ length: Math.ceil(roundMatches.length / 2) }).map((_, i) => (
+                  <div key={i} className="flex flex-col justify-around" style={{ height: `${2 * 70 + 16}px` }}>
+                    <Connector colorClass={lineColor} />
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )
       })}
