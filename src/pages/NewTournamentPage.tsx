@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, type ReactNode } from "react"
 import { useNavigate } from "react-router-dom"
 import { useLiveQuery } from "dexie-react-hooks"
 import { db } from "@/lib/db"
@@ -21,6 +21,11 @@ const FINALS_FORMATS: { value: LeagueFinalsFormat; label: string; hasTop4: boole
 
 function uid(): string {
   return crypto.randomUUID()
+}
+
+function Hint({ show, children }: { show: boolean; children: ReactNode }) {
+  if (!show) return null
+  return <span className="text-xs font-medium text-destructive">{children}</span>
 }
 
 function BestOfSelect({ label, value, onChange }: { label: string; value: BestOf; onChange: (v: BestOf) => void }) {
@@ -50,6 +55,7 @@ export function NewTournamentPage() {
 
   const [name, setName] = useState("")
   const [type, setType] = useState<TournamentType>("league")
+  const [typeTouched, setTypeTouched] = useState(false)
   const [selected, setSelected] = useState<string[]>([])
   const [finalsFormat, setFinalsFormat] = useState<LeagueFinalsFormat>("top4_round_robin")
   const [drawMethod, setDrawMethod] = useState<DrawMethod>("random")
@@ -113,13 +119,25 @@ export function NewTournamentPage() {
 
       <div className="flex flex-col gap-6">
         <div className="flex flex-col gap-2">
-          <Label htmlFor="tournament-name">Name</Label>
+          <div className="flex items-center gap-2">
+            <Label htmlFor="tournament-name">Name</Label>
+            <Hint show={name.trim().length === 0}>Type a name</Hint>
+          </div>
           <Input id="tournament-name" value={name} onChange={(e) => setName(e.target.value)} className="min-h-11" />
         </div>
 
         <div className="flex flex-col gap-2">
-          <Label>Type</Label>
-          <Tabs value={type} onValueChange={(v) => setType(v as TournamentType)}>
+          <div className="flex items-center gap-2">
+            <Label>Type</Label>
+            <Hint show={!typeTouched}>Select a type</Hint>
+          </div>
+          <Tabs
+            value={type}
+            onValueChange={(v) => {
+              setType(v as TournamentType)
+              setTypeTouched(true)
+            }}
+          >
             <TabsList className="grid w-full grid-cols-2">
               <TabsTrigger value="league" className="min-h-11">
                 League
@@ -132,9 +150,12 @@ export function NewTournamentPage() {
         </div>
 
         <div className="flex flex-col gap-2">
-          <Label>
-            Players ({selected.length}/16, min 2)
-          </Label>
+          <div className="flex items-center gap-2">
+            <Label>
+              Players ({selected.length}/16, min 2)
+            </Label>
+            <Hint show={selected.length === 0}>Click the players</Hint>
+          </div>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {players.map((p) => (
               <button

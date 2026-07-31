@@ -20,12 +20,20 @@ function MatchBox({ match, onSelect }: { match: Match; onSelect?: (id: string) =
       disabled={!clickable}
       onClick={() => match.player1Id && match.player2Id && onSelect?.(match.id)}
       className={cn(
-        "flex w-48 flex-col justify-center gap-1 rounded-md border border-border bg-card px-3 py-2 text-left text-sm shadow-sm",
+        "relative flex w-48 flex-col justify-center gap-1 rounded-md border border-border bg-card px-3 py-2 text-left text-sm shadow-sm",
         BOX_HEIGHT,
         clickable && "hover:border-primary hover:bg-muted",
         match.status === "completed" && "opacity-80",
       )}
     >
+      {clickable && (
+        <span
+          className="absolute -right-1.5 -top-1.5 flex h-4 items-center rounded-full bg-destructive px-1.5 text-[10px] font-semibold leading-none text-white"
+          title="Needs score"
+        >
+          Needs score
+        </span>
+      )}
       <div className={cn("flex justify-between", match.winnerId === match.player1Id && "font-semibold")}>
         <span className="truncate">
           {p1?.name ?? (match.player1Id ? "…" : "TBD")}

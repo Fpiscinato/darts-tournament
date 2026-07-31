@@ -4,6 +4,7 @@ import { db } from "@/lib/db"
 import { confirmMatch, undoLastConfirmedResult } from "@/lib/engine"
 import { isValidCompletedScore } from "@/lib/format"
 import { useToast } from "@/context/ToastContext"
+import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { DartHitEffect } from "./DartHitEffect"
 import {
@@ -42,6 +43,8 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
 
   const decided = isValidCompletedScore(match.bestOf, match.player1Legs, match.player2Legs)
   const someoneWon = match.player1Legs >= match.legsToWin || match.player2Legs >= match.legsToWin
+  const p1Won = match.player1Legs >= match.legsToWin
+  const p2Won = match.player2Legs >= match.legsToWin
 
   async function winLeg(slot: 1 | 2) {
     if (!match || someoneWon) return
@@ -110,7 +113,12 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
       </div>
 
       <div className="grid grid-cols-2 gap-3">
-        <div className="relative flex flex-col items-center gap-2 overflow-hidden rounded-lg border border-border p-4">
+        <div
+          className={cn(
+            "relative flex flex-col items-center gap-2 overflow-hidden rounded-lg border border-border p-4",
+            p1Won && "ring-2 ring-inset ring-emerald-500",
+          )}
+        >
           <DartHitEffect triggerKey={hitP1} />
           <span className="truncate text-center font-medium">{p1Name}</span>
           <span className="text-4xl font-bold tabular-nums">{match.player1Legs}</span>
@@ -118,7 +126,12 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
             {p1Name} Wins Leg
           </Button>
         </div>
-        <div className="relative flex flex-col items-center gap-2 overflow-hidden rounded-lg border border-border p-4">
+        <div
+          className={cn(
+            "relative flex flex-col items-center gap-2 overflow-hidden rounded-lg border border-border p-4",
+            p2Won && "ring-2 ring-inset ring-emerald-500",
+          )}
+        >
           <DartHitEffect triggerKey={hitP2} />
           <span className="truncate text-center font-medium">{p2Name}</span>
           <span className="text-4xl font-bold tabular-nums">{match.player2Legs}</span>
@@ -131,11 +144,11 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
       <div className="flex flex-col gap-3">
         <Button
           size="lg"
-          className="min-h-11"
+          className={cn("min-h-11", decided && "ring-2 ring-emerald-500 ring-offset-2 ring-offset-background")}
           disabled={!decided}
           onClick={handleConfirm}
         >
-          Confirm Result
+          {decided ? "Confirm Result — winner decided" : "Confirm Result"}
         </Button>
 
         <div className="grid grid-cols-2 gap-3">
