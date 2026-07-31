@@ -8,6 +8,7 @@ import { NewTournamentPage } from "@/pages/NewTournamentPage"
 import { TournamentPage } from "@/pages/TournamentPage"
 import { HistoryPage } from "@/pages/HistoryPage"
 import { SettingsPage } from "@/pages/SettingsPage"
+import { HelpPage } from "@/pages/HelpPage"
 
 function App() {
   return (
@@ -24,6 +25,7 @@ function App() {
               <Route path="/tournaments/:id" element={<TournamentPage />} />
               <Route path="/history" element={<HistoryPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/help" element={<HelpPage />} />
             </Routes>
           </main>
         </div>
