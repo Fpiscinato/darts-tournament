@@ -24,11 +24,20 @@ export class DartsDB extends Dexie {
 export const db = new DartsDB()
 
 const DEFAULT_PLAYERS = [
-  "Alex", "Bianca", "Carlos", "Diana", "Erik", "Fabio", "Gina", "Hugo", "Ivy",
+  "Fernando", "Leggy", "Carl", "Joey", "Jaz", "Sam", "Darren", "Glen", "Scott",
 ]
 
 function uid(): string {
   return crypto.randomUUID()
+}
+
+function shuffledSeeds(count: number): number[] {
+  const seeds = Array.from({ length: count }, (_, i) => i + 1)
+  for (let i = seeds.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[seeds[i], seeds[j]] = [seeds[j], seeds[i]]
+  }
+  return seeds
 }
 
 /** Seeds the 9 default players only on the very first run ever (detected by
@@ -39,12 +48,13 @@ export async function ensureSeeded(): Promise<void> {
   if (settings) return
 
   const now = new Date().toISOString()
+  const seeds = shuffledSeeds(DEFAULT_PLAYERS.length)
   await db.players.bulkAdd(
-    DEFAULT_PLAYERS.map((name) => ({
+    DEFAULT_PLAYERS.map((name, i) => ({
       id: uid(),
       name,
       active: true,
-      seed: null,
+      seed: seeds[i],
       createdAt: now,
       updatedAt: now,
     })),

@@ -1,5 +1,6 @@
 import { NavLink } from "react-router-dom"
 import { cn } from "@/lib/utils"
+import { DartboardIcon } from "./DartboardIcon"
 
 const links = [
   { to: "/", label: "Tournaments" },
@@ -11,6 +12,10 @@ const links = [
 export function NavBar() {
   return (
     <nav className="flex items-center gap-1 overflow-x-auto border-b border-border px-2 py-2">
+      <div className="mr-1 flex shrink-0 items-center gap-2 pl-1 pr-2">
+        <DartboardIcon className="size-6" />
+        <span className="hidden text-sm font-semibold sm:inline">Darts Tournament</span>
+      </div>
       {links.map((link) => (
         <NavLink
           key={link.to}

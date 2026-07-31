@@ -91,3 +91,30 @@ body {
 #root {
   min-height: 100svh;
 }
+
+@keyframes dart-throw {
+  0% {
+    transform: translate(28px, -28px) scale(0.6) rotate(-25deg);
+    opacity: 0;
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(0, 0) scale(1) rotate(0deg);
+    opacity: 1;
+  }
+}
+
+@keyframes dart-impact {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.18);
+  }
+  55% {
+    transform: scale(0.95);
+  }
+}

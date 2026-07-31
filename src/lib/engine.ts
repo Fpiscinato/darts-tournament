@@ -500,3 +500,14 @@ export async function reopenTournament(tournamentId: string): Promise<void> {
     })
   })
 }
+
+/** Permanently deletes a tournament along with all of its matches and
+ * results. Irreversible — the caller is responsible for confirming with
+ * the user first. */
+export async function deleteTournament(tournamentId: string): Promise<void> {
+  await db.transaction("rw", db.tournaments, db.matches, db.results, async () => {
+    await db.matches.where({ tournamentId }).delete()
+    await db.results.where({ tournamentId }).delete()
+    await db.tournaments.delete(tournamentId)
+  })
+}

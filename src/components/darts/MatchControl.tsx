@@ -5,6 +5,7 @@ import { confirmMatch, undoLastConfirmedResult } from "@/lib/engine"
 import { isValidCompletedScore } from "@/lib/format"
 import { useToast } from "@/context/ToastContext"
 import { Button } from "@/components/ui/button"
+import { DartHitEffect } from "./DartHitEffect"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,6 +27,8 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
   const [history, setHistory] = useState<(1 | 2)[]>([])
   const [confirmReset, setConfirmReset] = useState(false)
   const [confirmUndoLast, setConfirmUndoLast] = useState(false)
+  const [hitP1, setHitP1] = useState(0)
+  const [hitP2, setHitP2] = useState(0)
   const { notify } = useToast()
 
   const p1Name = usePlayerName(match?.player1Id ?? null)
@@ -46,6 +49,8 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
       slot === 1 ? { player1Legs: match.player1Legs + 1 } : { player2Legs: match.player2Legs + 1 }
     await db.matches.update(match.id, { ...patch, status: "in_progress", updatedAt: new Date().toISOString() })
     setHistory((h) => [...h, slot])
+    if (slot === 1) setHitP1((n) => n + 1)
+    else setHitP2((n) => n + 1)
   }
 
   async function undoLastLeg() {
@@ -105,14 +110,16 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
       </div>
 
       <div className="grid grid-cols-2 gap-3">
-        <div className="flex flex-col items-center gap-2 rounded-lg border border-border p-4">
+        <div className="relative flex flex-col items-center gap-2 overflow-hidden rounded-lg border border-border p-4">
+          <DartHitEffect triggerKey={hitP1} />
           <span className="truncate text-center font-medium">{p1Name}</span>
           <span className="text-4xl font-bold tabular-nums">{match.player1Legs}</span>
           <Button className="min-h-11 w-full" disabled={someoneWon} onClick={() => winLeg(1)}>
             {p1Name} Wins Leg
           </Button>
         </div>
-        <div className="flex flex-col items-center gap-2 rounded-lg border border-border p-4">
+        <div className="relative flex flex-col items-center gap-2 overflow-hidden rounded-lg border border-border p-4">
+          <DartHitEffect triggerKey={hitP2} />
           <span className="truncate text-center font-medium">{p2Name}</span>
           <span className="text-4xl font-bold tabular-nums">{match.player2Legs}</span>
           <Button className="min-h-11 w-full" disabled={someoneWon} onClick={() => winLeg(2)}>

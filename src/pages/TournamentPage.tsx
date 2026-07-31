@@ -1,8 +1,10 @@
 import { useState } from "react"
-import { useParams } from "react-router-dom"
+import { useNavigate, useParams } from "react-router-dom"
 import { useLiveQuery } from "dexie-react-hooks"
+import { Trash2 } from "lucide-react"
 import { db } from "@/lib/db"
-import { reopenTournament } from "@/lib/engine"
+import { deleteTournament, reopenTournament } from "@/lib/engine"
+import { useToast } from "@/context/ToastContext"
 import { MatchControl } from "@/components/darts/MatchControl"
 import { MatchList } from "@/components/darts/MatchList"
 import { StandingsTable } from "@/components/darts/StandingsTable"
@@ -30,8 +32,11 @@ const STAGE_LABEL: Record<Stage, string> = {
 
 export function TournamentPage() {
   const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
+  const { notify } = useToast()
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null)
   const [confirmReopen, setConfirmReopen] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   const tournament = useLiveQuery(() => (id ? db.tournaments.get(id) : undefined), [id])
   const matches = useLiveQuery(() => (id ? db.matches.where({ tournamentId: id }).toArray() : []), [id])
@@ -61,11 +66,22 @@ export function TournamentPage() {
             {tournament.status === "active" && <Badge>Active</Badge>}
           </div>
         </div>
-        {tournament.status === "completed" && (
-          <Button variant="outline" className="min-h-11" onClick={() => setConfirmReopen(true)}>
-            Reopen
+        <div className="flex items-center gap-2">
+          {tournament.status === "completed" && (
+            <Button variant="outline" className="min-h-11" onClick={() => setConfirmReopen(true)}>
+              Reopen
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="icon"
+            className="min-h-11 min-w-11 text-destructive"
+            onClick={() => setConfirmDelete(true)}
+            aria-label="Delete tournament"
+          >
+            <Trash2 />
           </Button>
-        )}
+        </div>
       </div>
 
       {tournament.status === "completed" && (
@@ -146,6 +162,31 @@ export function TournamentPage() {
               }}
             >
               Reopen
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete "{tournament.name}"?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently deletes this tournament and all of its matches and results. This cannot be undone
+              unless you have a backup file to import afterwards.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="min-h-11">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="min-h-11"
+              onClick={async () => {
+                await deleteTournament(tournament.id)
+                notify(`${tournament.name} deleted`)
+                navigate("/")
+              }}
+            >
+              Delete
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

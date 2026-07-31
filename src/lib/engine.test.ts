@@ -3,6 +3,7 @@ import { db } from "./db"
 import {
   EngineError,
   confirmMatch,
+  deleteTournament,
   finishTournament,
   reopenTournament,
   startTournament,
@@ -318,5 +319,27 @@ describe("finishTournament duplicate-archive prevention", () => {
     await finishTournament(t.id) // already finished by confirmMatch; calling again should not duplicate
     const results = await db.results.where({ tournamentId: t.id }).toArray()
     expect(results.length).toBe(2)
+  })
+})
+
+describe("deleteTournament", () => {
+  it("removes the tournament and all of its matches and results", async () => {
+    const ids = players(2)
+    const t = await makeTournament({
+      type: "league",
+      playerIds: ids,
+      finalsFormat: "league_winner",
+      stageFormats: { league: 3 },
+    })
+    await startTournament(t.id)
+    const [match] = await db.matches.where({ tournamentId: t.id }).toArray()
+    await confirmMatch(match.id, 2, 0)
+    expect(await db.results.where({ tournamentId: t.id }).count()).toBe(2)
+
+    await deleteTournament(t.id)
+
+    expect(await db.tournaments.get(t.id)).toBeUndefined()
+    expect(await db.matches.where({ tournamentId: t.id }).count()).toBe(0)
+    expect(await db.results.where({ tournamentId: t.id }).count()).toBe(0)
   })
 })
