@@ -1,4 +1,4 @@
-import { db } from "./db"
+import { db, ensureSeeded } from "./db"
 import { SCHEMA_VERSION } from "./types"
 import type { AppSettings, Match, Player, Tournament, TournamentPlayerResult } from "./types"
 
@@ -79,11 +79,18 @@ export async function replaceAllWithBackup(backup: BackupFile): Promise<void> {
   })
 }
 
-/** Wipes everything, including players. Re-marks the app as "already run
- * before" so the default 9 players are not reseeded on next load. */
+/** Wipes everything and puts the app back to a just-installed state,
+ * including reseeding the default players — the same state you'd see
+ * opening the app for the very first time. */
 export async function fullReset(): Promise<void> {
   await db.transaction("rw", db.players, db.tournaments, db.matches, db.results, db.settings, async () => {
-    await Promise.all([db.players.clear(), db.tournaments.clear(), db.matches.clear(), db.results.clear()])
-    await db.settings.put({ id: "settings", schemaVersion: SCHEMA_VERSION, theme: "system" })
+    await Promise.all([
+      db.players.clear(),
+      db.tournaments.clear(),
+      db.matches.clear(),
+      db.results.clear(),
+      db.settings.clear(),
+    ])
   })
+  await ensureSeeded()
 }

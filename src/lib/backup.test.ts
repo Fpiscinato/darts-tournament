@@ -44,14 +44,33 @@ describe("parseBackupFile", () => {
 })
 
 describe("fullReset", () => {
-  it("wipes all data and does not reseed default players afterwards", async () => {
+  it("wipes all data and puts the app back to a just-installed state", async () => {
     await ensureSeeded()
-    expect(await db.players.count()).toBe(9)
+    const originalIds = (await db.players.toArray()).map((p) => p.id).sort()
+    expect(originalIds.length).toBe(9)
+
+    const t = {
+      id: "t1",
+      name: "Cup",
+      type: "league" as const,
+      status: "draft" as const,
+      playerIds: originalIds.slice(0, 2),
+      finalsFormat: "league_winner" as const,
+      drawMethod: null,
+      stageFormats: {},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+    }
+    await db.tournaments.add(t)
 
     await fullReset()
-    expect(await db.players.count()).toBe(0)
 
-    await ensureSeeded()
-    expect(await db.players.count()).toBe(0) // stays empty — not a "first run" anymore
+    expect(await db.tournaments.count()).toBe(0)
+    const freshPlayers = await db.players.toArray()
+    expect(freshPlayers.length).toBe(9)
+    // Genuinely fresh: new ids, not a resurrection of the old rows.
+    expect(freshPlayers.some((p) => originalIds.includes(p.id))).toBe(false)
   })
 })
