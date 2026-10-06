@@ -104,21 +104,6 @@ function ellipsize(ctx: CanvasRenderingContext2D, text: string, maxWidth: number
   return `${t}…`
 }
 
-function ordinal(n: number): string {
-  const rem = n % 100
-  if (rem >= 11 && rem <= 13) return `${n}th`
-  switch (n % 10) {
-    case 1:
-      return `${n}st`
-    case 2:
-      return `${n}nd`
-    case 3:
-      return `${n}rd`
-    default:
-      return `${n}th`
-  }
-}
-
 function drawLegend(ctx: CanvasRenderingContext2D, x: number, y: number, text: string) {
   ctx.fillStyle = COLORS.label
   ctx.font = `600 26px ${FONT_FAMILY}`
@@ -133,12 +118,9 @@ function computeHeight(model: RankingModel): number {
     62 + // title
     42 + // subtitle
     40 + // gap
-    42 + // section label (podium)
-    Math.min(n, 3) * 78 + // podium rows
-    18 + // gap
-    42 + // section label (full table)
-    46 + // header row
-    n * 50 + // table rows
+    46 + // section label
+    54 + // header row
+    n * 54 + // table rows
     (model.notes.length > 0 ? 18 + model.notes.length * 40 : 0) + // withdrawal notes
     40 + // gap
     56 + // footer
@@ -146,10 +128,10 @@ function computeHeight(model: RankingModel): number {
   )
 }
 
-type StatKey = "pts" | "wl" | "legs"
+type StatKey = "pts" | "wl" | "diff"
 
-/** Right-aligned numeric columns shared by the podium and the full table.
- * Finite widths are reserved before any drawing, so nothing overlaps. */
+/** Right-aligned numeric columns. Finite widths are reserved before any
+ * drawing, so headers and values can never overlap or run off the card. */
 function computeStatColumns(
   ctx: CanvasRenderingContext2D,
   right: number,
@@ -159,16 +141,16 @@ function computeStatColumns(
   const fonts: Record<StatKey, string> = {
     pts: `500 28px ${FONT_FAMILY}`,
     wl: `500 28px ${FONT_FAMILY}`,
-    legs: `600 28px ${FONT_FAMILY}`,
+    diff: `600 28px ${FONT_FAMILY}`,
   }
-  const labels: Record<StatKey, string> = { pts: "Pts", wl: "W–L", legs: "Legs" }
+  const labels: Record<StatKey, string> = { pts: "Pts", wl: "W–L", diff: "Diff" }
   const value = (key: StatKey, r: RankingRow): string => {
     switch (key) {
       case "pts":
         return String(r.points)
       case "wl":
         return `${r.wins}W–${r.losses}L`
-      case "legs":
+      case "diff":
         return r.legDiff !== 0 ? `${r.legDiff > 0 ? "+" : ""}${r.legDiff}` : "–"
     }
   }
@@ -182,14 +164,17 @@ function computeStatColumns(
   const width = {
     pts: widthOf("pts"),
     wl: widthOf("wl"),
-    legs: widthOf("legs"),
+    diff: widthOf("diff"),
   }
-  const gap = 36
-  const xPts = right - width.pts
-  const xWl = xPts - gap - width.wl
-  const xLegs = xWl - gap - width.legs
+  // drawStats right-aligns at cols.x, so x IS the right edge of the text:
+  // place the rightmost column flush against `right`, then step left by each
+  // column's measured width plus the gap.
+  const gap = 44
+  const xPts = right
+  const xWl = xPts - width.pts - gap
+  const xDiff = xWl - width.wl - gap
   return {
-    x: { pts: xPts, wl: xWl, legs: xLegs },
+    x: { pts: xPts, wl: xWl, diff: xDiff },
     width,
   }
 }
@@ -199,25 +184,19 @@ function drawStats(
   row: RankingRow,
   cols: { x: Record<StatKey, number>; width: Record<StatKey, number> },
   y: number,
-  showLegs: boolean,
 ) {
-  const fonts: Record<StatKey, string> = {
-    pts: `500 28px ${FONT_FAMILY}`,
-    wl: `500 28px ${FONT_FAMILY}`,
-    legs: `600 28px ${FONT_FAMILY}`,
-  }
   const values: Array<[StatKey, string]> = [
-    ["pts", String(row.points)],
     ["wl", `${row.wins}W–${row.losses}L`],
+    ["diff", row.legDiff !== 0 ? `${row.legDiff > 0 ? "+" : ""}${row.legDiff}` : "–"],
+    ["pts", String(row.points)],
   ]
-  if (showLegs) values.push(["legs", row.legDiff !== 0 ? `${row.legDiff > 0 ? "+" : ""}${row.legDiff}` : "–"])
-
   for (const [key, text] of values) {
-    ctx.font = fonts[key]
-    ctx.fillStyle = key === "legs" ? (row.legDiff >= 0 ? COLORS.emerald : COLORS.red) : COLORS.dim
     ctx.textAlign = "right"
+    ctx.font = key === "diff" ? `600 28px ${FONT_FAMILY}` : `500 28px ${FONT_FAMILY}`
+    ctx.fillStyle = key === "diff" ? (row.legDiff >= 0 ? COLORS.emerald : COLORS.red) : COLORS.dim
     ctx.fillText(text, cols.x[key], y)
   }
+  ctx.textAlign = "left"
 }
 
 /** Renders the finished-tournament ranking card and returns it as a PNG. */
@@ -280,60 +259,51 @@ export function drawRankingCard(canvas: HTMLCanvasElement, model: RankingModel):
 
   const cols = computeStatColumns(ctx, right, model.rows)
 
-  // Podium (top 3)
-  drawLegend(ctx, left, y, "Podium")
-  y += 42
-  for (const row of model.rows.slice(0, 3)) {
-    const medalText = row.medal ?? ordinal(row.position)
-    const nameMax = cols.x.legs - (left + 64) - 24
-    const nameText = ellipsize(ctx, row.name, nameMax)
-    ctx.font = `600 34px ${FONT_FAMILY}`
-    const medalW = ctx.measureText(medalText).width
-    const nameW = ctx.measureText(nameText).width
-    ctx.fillStyle = COLORS.gold
-    ctx.fillText(medalText, left, y)
-    ctx.fillStyle = COLORS.text
-    ctx.fillText(nameText, left + medalW + 16, y)
-    if (row.wonTitle) {
-      ctx.font = `600 28px ${FONT_FAMILY}`
-      ctx.fillText("🏆", left + medalW + 16 + nameW + 12, y)
-    }
-    drawStats(ctx, row, cols, y, true)
-    y += 78
-  }
-
-  // Full table
-  y += 18
-  drawLegend(ctx, left, y, "Full ranking")
+  // Single, uncrowded ranking table: medals live in the Pos column, so
+  // nothing repeats and no two text runs can land on the same pixels.
+  drawLegend(ctx, left, y, "Final ranking")
+  ctx.textBaseline = "alphabetic"
   y += 46
+
+  // Column headers (explicit alignment per block — drawStats flips it around).
   ctx.font = `600 26px ${FONT_FAMILY}`
   ctx.fillStyle = COLORS.label
   ctx.textAlign = "left"
   ctx.fillText("Pos", left, y)
   ctx.fillText("Player", left + 64, y)
-  for (const key of ["pts", "wl", "legs"] as StatKey[]) {
-    const label = key === "pts" ? "Pts" : key === "wl" ? "W–L" : "Legs"
+  for (const key of ["wl", "diff", "pts"] as StatKey[]) {
     ctx.textAlign = "right"
-    ctx.fillText(label, cols.x[key], y)
+    ctx.fillText(key === "pts" ? "Pts" : key === "wl" ? "W–L" : "Diff", cols.x[key], y)
   }
-  y += 46
+  ctx.textAlign = "left"
+  y += 54
 
   for (const row of model.rows) {
-    ctx.font = `500 28px ${FONT_FAMILY}`
-    ctx.fillStyle = COLORS.dim
+    // Position or medal (always left-aligned, never overlapping the name).
     ctx.textAlign = "left"
-    ctx.fillText(String(row.position), left, y)
+    if (row.medal) {
+      ctx.font = `600 30px ${FONT_FAMILY}`
+      ctx.fillStyle = COLORS.gold
+      ctx.fillText(row.medal, left, y)
+    } else {
+      ctx.font = `500 28px ${FONT_FAMILY}`
+      ctx.fillStyle = COLORS.dim
+      ctx.fillText(String(row.position), left, y)
+    }
 
+    // Player name (+ withdrawal flag and champion trophy).
     const flag = row.withdrawn ? "⚠️ " : ""
     const trophy = row.wonTitle ? " 🏆" : ""
+    ctx.font = `600 30px ${FONT_FAMILY}`
+    const nameMax = cols.x.diff - cols.width.diff - (left + 64) - 24
+    const fixedW = ctx.measureText(flag).width + ctx.measureText(trophy).width
+    const nameText = ellipsize(ctx, row.name, Math.max(60, nameMax - fixedW))
     ctx.fillStyle = COLORS.text
-    ctx.font = `600 32px ${FONT_FAMILY}`
-    const nameMax = cols.x.legs - (left + 64) - 24
     ctx.textAlign = "left"
-    ctx.fillText(flag + ellipsize(ctx, row.name, nameMax) + trophy, left + 64, y)
+    ctx.fillText(flag + nameText + trophy, left + 64, y)
 
-    drawStats(ctx, row, cols, y, true)
-    y += 50
+    drawStats(ctx, row, cols, y)
+    y += 54
   }
 
   // Withdrawal notes

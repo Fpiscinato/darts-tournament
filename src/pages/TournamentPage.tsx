@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import { useLiveQuery } from "dexie-react-hooks"
 import { Share2, Trash2, Users } from "lucide-react"
@@ -37,6 +37,8 @@ const STAGE_LABEL: Record<Stage, string> = {
   knockout: "Knockout",
 }
 
+const STAGE_ORDER: Stage[] = ["league", "top4", "knockout", "final"]
+
 export function TournamentPage() {
   const { id, matchId } = useParams<{ id: string; matchId?: string }>()
   const navigate = useNavigate()
@@ -65,6 +67,25 @@ export function TournamentPage() {
   const results = useLiveQuery(() => (id ? db.results.where({ tournamentId: id }).toArray() : []), [id])
   const players = useLiveQuery(() => db.players.toArray(), [])
 
+  // When a new stage is generated (e.g. the Top 4 fixtures appear the moment
+  // the last league match is confirmed), jump to it automatically if the tab
+  // the user is looking at is already finished — no manual tab hunting.
+  // Once the user clicks a tab themselves, we stop forcing the switch until
+  // another stage pops into existence.
+  const prevStagesRef = useRef<Stage[]>([])
+  useEffect(() => {
+    if (!matches) return
+    const present = Array.from(new Set(matches.map((m) => m.stage))) as Stage[]
+    const natural = STAGE_ORDER.filter((s) => present.includes(s))
+    const prev = prevStagesRef.current
+    prevStagesRef.current = natural
+    if (prev.length === 0 || natural.length === prev.length) return
+    const isDone = (s: Stage) => matches.filter((m) => m.stage === s).every((m) => m.status === "completed")
+    const current = activeTab && natural.includes(activeTab as Stage) ? (activeTab as Stage) : null
+    const newStage = natural.find((s) => !prev.includes(s) && !isDone(s))
+    if (newStage && (!current || isDone(current))) setActiveTab(newStage)
+  }, [matches, activeTab])
+
   if (tournamentRow === undefined || !matches || !results || !players) {
     return <PageSkeleton rows={5} className="mx-auto max-w-3xl px-4 py-6" />
   }
@@ -90,8 +111,7 @@ export function TournamentPage() {
   const withdrawnSet = new Set(withdrawnIds)
 
   const stagesPresent = Array.from(new Set(matches.map((m) => m.stage))) as Stage[]
-  const stageOrder: Stage[] = ["league", "top4", "knockout", "final"]
-  const naturalStages = stageOrder.filter((s) => stagesPresent.includes(s))
+  const naturalStages = STAGE_ORDER.filter((s) => stagesPresent.includes(s))
 
   // Tabs always follow the tournament sequence — League → Top 4 → Final —
   // regardless of which stage still has work to do, so the order never shifts
@@ -108,7 +128,9 @@ export function TournamentPage() {
     .sort((a, b) => stagePriority(a.stage) - stagePriority(b.stage) || a.round - b.round)
     .slice(0, 4)
 
-  const defaultTab = orderedStages[0] ?? naturalStages[0]
+  // Default tab: the first stage that still needs playing (so a finished
+  // league lands you on the Top 4 / Final straight away), else the first stage.
+  const defaultTab = naturalStages.find((s) => !stageDone(s)) ?? naturalStages[0]
   const resolvedTab =
     activeTab && naturalStages.includes(activeTab as Stage) ? (activeTab as Stage) : (defaultTab ?? "league")
 
