@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Badge } from "@/components/ui/badge"
+import { PageSkeleton } from "@/components/darts/PageSkeleton"
 import {
   Dialog,
   DialogContent,
@@ -140,9 +141,13 @@ function PlayerRow({ player }: { player: Player }) {
   const { notify } = useToast()
 
   async function handleDelete() {
-    const result = await deleteOrArchivePlayer(player.id)
-    notify(result === "deleted" ? `${player.name} deleted` : `${player.name} archived (has match history)`)
-    setConfirmDelete(false)
+    try {
+      const result = await deleteOrArchivePlayer(player.id)
+      notify(result === "deleted" ? `${player.name} deleted` : `${player.name} archived (has match history)`)
+      setConfirmDelete(false)
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Could not remove the player", "destructive")
+    }
   }
 
   return (
@@ -155,7 +160,11 @@ function PlayerRow({ player }: { player: Player }) {
       <div className="flex items-center gap-2">
         <Switch
           checked={player.active}
-          onCheckedChange={(v) => setPlayerActive(player.id, v)}
+          onCheckedChange={(v) => {
+            setPlayerActive(player.id, v).catch((err) =>
+              notify(err instanceof Error ? err.message : "Could not update player", "destructive"),
+            )
+          }}
           aria-label={player.active ? "Deactivate" : "Activate"}
         />
         <Button variant="ghost" size="icon" className="min-h-11 min-w-11" onClick={() => setEditing(true)} aria-label="Edit">
@@ -198,7 +207,7 @@ function PlayerRow({ player }: { player: Player }) {
 export function PlayersPage() {
   const players = useLiveQuery(() => db.players.orderBy("name").toArray(), [])
 
-  if (!players) return null
+  if (!players) return <PageSkeleton rows={5} className="mx-auto max-w-2xl px-4 py-6" />
 
   const active = players.filter((p) => p.active)
   const archived = players.filter((p) => !p.active)

@@ -14,7 +14,7 @@ function MatchRow({ match, onSelect }: { match: Match; onSelect: (id: string) =>
   const isBye = match.status === "completed" && (!match.player1Id || !match.player2Id)
 
   return (
-    <div className="flex min-h-11 items-center justify-between gap-2 rounded-md border border-border/60 bg-card px-3 py-2">
+    <div className="flex min-h-11 items-center justify-between gap-2 rounded-md border border-border/60 bg-card px-3 py-2 transition-colors hover:border-foreground/20 hover:bg-muted/40">
       <div className="min-w-0 flex-1 text-sm">
         <span className={match.winnerId === match.player1Id ? "font-semibold" : ""}>{p1?.name ?? (match.player1Id ? "…" : "TBD")}</span>
         <span className="mx-1 text-muted-foreground">vs</span>
@@ -22,7 +22,7 @@ function MatchRow({ match, onSelect }: { match: Match; onSelect: (id: string) =>
       </div>
       {match.status === "completed" ? (
         <Badge variant={isBye ? "outline" : "secondary"}>
-          {isBye ? "Bye" : `${match.player1Legs}-${match.player2Legs}`}
+          {isBye ? "Bye" : match.walkover ? "WO" : `${match.player1Legs}-${match.player2Legs}`}
         </Badge>
       ) : ready ? (
         <Button size="sm" className="min-h-11" onClick={() => onSelect(match.id)}>

@@ -5,6 +5,14 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#0f172a" />
+    <script>
+      // Pre-paint: match the OS preference so dark users don't see a light flash
+      // before IndexedDB finishes loading the saved preference.
+      try {
+        var m = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)')
+        if (!m || m.matches) document.documentElement.classList.add('dark')
+      } catch (e) {}
+    </script>
     <meta name="description" content="Live darts tournament scoring, brackets and standings." />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />

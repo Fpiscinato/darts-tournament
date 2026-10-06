@@ -1,7 +1,12 @@
 import { useRef, useState } from "react"
+import { useLiveQuery } from "dexie-react-hooks"
 import { BackupError, exportBackup, fullReset, parseBackupFile, replaceAllWithBackup, type BackupFile } from "@/lib/backup"
+import { db } from "@/lib/db"
+import { SCHEMA_VERSION } from "@/lib/types"
 import { useToast } from "@/context/ToastContext"
 import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,17 +23,36 @@ export function SettingsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [pendingImport, setPendingImport] = useState<BackupFile | null>(null)
   const [confirmReset, setConfirmReset] = useState(false)
+  const [busy, setBusy] = useState<"export" | "import" | "reset" | null>(null)
+  const settings = useLiveQuery(() => db.settings.get("settings"), [])
+
+  async function handleThemeChange(theme: "light" | "dark" | "system") {
+    try {
+      await db.settings.put({ id: "settings", schemaVersion: SCHEMA_VERSION, theme })
+      notify("Appearance updated")
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Could not update the theme", "destructive")
+    }
+  }
 
   async function handleExport() {
-    const backup = await exportBackup()
-    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = `darts-tournament-backup-${new Date().toISOString().slice(0, 10)}.json`
-    a.click()
-    URL.revokeObjectURL(url)
-    notify("Backup downloaded")
+    if (busy) return
+    setBusy("export")
+    try {
+      const backup = await exportBackup()
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `darts-tournament-backup-${new Date().toISOString().slice(0, 10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      notify("Backup downloaded")
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Could not export the backup", "destructive")
+    } finally {
+      setBusy(null)
+    }
   }
 
   async function handleFileChosen(e: React.ChangeEvent<HTMLInputElement>) {
@@ -45,16 +69,31 @@ export function SettingsPage() {
   }
 
   async function confirmImport() {
-    if (!pendingImport) return
-    await replaceAllWithBackup(pendingImport)
-    setPendingImport(null)
-    notify("Backup restored")
+    if (!pendingImport || busy) return
+    setBusy("import")
+    try {
+      await replaceAllWithBackup(pendingImport)
+      setPendingImport(null)
+      notify("Backup restored")
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Could not restore this backup", "destructive")
+    } finally {
+      setBusy(null)
+    }
   }
 
   async function handleFullReset() {
-    await fullReset()
-    setConfirmReset(false)
-    notify("App reset to a blank slate")
+    if (busy) return
+    setBusy("reset")
+    try {
+      await fullReset()
+      setConfirmReset(false)
+      notify("App reset to a blank slate")
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Could not reset the app", "destructive")
+    } finally {
+      setBusy(null)
+    }
   }
 
   return (
@@ -62,11 +101,28 @@ export function SettingsPage() {
       <h1 className="mb-4 text-xl font-semibold">Settings</h1>
 
       <section className="mb-8 flex flex-col gap-3">
+        <h2 className="text-sm font-medium text-muted-foreground">Appearance</h2>
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="theme-select">Theme</Label>
+          <Select value={settings?.theme ?? "system"} onValueChange={(v) => handleThemeChange(v as "light" | "dark" | "system")}>
+            <SelectTrigger id="theme-select" className="min-h-11 w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="system">System</SelectItem>
+              <SelectItem value="light">Light</SelectItem>
+              <SelectItem value="dark">Dark</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </section>
+
+      <section className="mb-8 flex flex-col gap-3">
         <h2 className="text-sm font-medium text-muted-foreground">Backup</h2>
-        <Button className="min-h-11" variant="outline" onClick={handleExport}>
-          Export backup
+        <Button className="min-h-11" variant="outline" disabled={busy !== null} onClick={handleExport}>
+          {busy === "export" ? "Exporting…" : "Export backup"}
         </Button>
-        <Button className="min-h-11" variant="outline" onClick={() => fileInputRef.current?.click()}>
+        <Button className="min-h-11" variant="outline" disabled={busy !== null} onClick={() => fileInputRef.current?.click()}>
           Import backup
         </Button>
         <input ref={fileInputRef} type="file" accept="application/json" className="hidden" onChange={handleFileChosen} />
@@ -77,12 +133,17 @@ export function SettingsPage() {
 
       <section className="flex flex-col gap-3">
         <h2 className="text-sm font-medium text-muted-foreground">Danger zone</h2>
-        <Button className="min-h-11" variant="destructive" onClick={() => setConfirmReset(true)}>
+        <Button className="min-h-11" variant="destructive" disabled={busy !== null} onClick={() => setConfirmReset(true)}>
           Full reset
         </Button>
       </section>
 
-      <AlertDialog open={pendingImport !== null} onOpenChange={(v) => !v && setPendingImport(null)}>
+      <AlertDialog
+        open={pendingImport !== null}
+        onOpenChange={(v) => {
+          if (!v && busy !== "import") setPendingImport(null)
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Replace all current data?</AlertDialogTitle>
@@ -93,15 +154,22 @@ export function SettingsPage() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="min-h-11">Cancel</AlertDialogCancel>
-            <AlertDialogAction className="min-h-11" onClick={confirmImport}>
-              Replace everything
+            <AlertDialogCancel className="min-h-11" disabled={busy !== null}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction className="min-h-11" disabled={busy !== null} onClick={confirmImport}>
+              {busy === "import" ? "Restoring…" : "Replace everything"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={confirmReset} onOpenChange={setConfirmReset}>
+      <AlertDialog
+        open={confirmReset}
+        onOpenChange={(v) => {
+          if (!v && busy !== "reset") setConfirmReset(false)
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Full reset — are you absolutely sure?</AlertDialogTitle>
@@ -111,9 +179,11 @@ export function SettingsPage() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="min-h-11">Cancel</AlertDialogCancel>
-            <AlertDialogAction className="min-h-11" onClick={handleFullReset}>
-              Delete everything
+            <AlertDialogCancel className="min-h-11" disabled={busy !== null}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction className="min-h-11" disabled={busy !== null} onClick={handleFullReset}>
+              {busy === "reset" ? "Deleting…" : "Delete everything"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -1,8 +1,14 @@
+import { useState } from "react"
 import { useLiveQuery } from "dexie-react-hooks"
 import { Link } from "react-router-dom"
+import { Share2 } from "lucide-react"
 import { db } from "@/lib/db"
 import { computeAllTimeRanking } from "@/lib/ranking"
+import type { Tournament } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { ShareDialog } from "@/components/darts/ShareDialog"
+import { PageSkeleton } from "@/components/darts/PageSkeleton"
 
 export function HistoryPage() {
   const results = useLiveQuery(() => db.results.toArray(), [])
@@ -11,8 +17,9 @@ export function HistoryPage() {
     () => db.tournaments.where("status").equals("completed").reverse().sortBy("completedAt"),
     [],
   )
+  const [shareTournament, setShareTournament] = useState<Tournament | null>(null)
 
-  if (!results || !players || !tournaments) return null
+  if (!results || !players || !tournaments) return <PageSkeleton rows={4} className="mx-auto max-w-2xl px-4 py-6" />
 
   const ranking = computeAllTimeRanking(results)
   const nameOf = (id: string) => players.find((p) => p.id === id)?.name ?? "?"
@@ -28,14 +35,15 @@ export function HistoryPage() {
         ) : (
           <div className="overflow-x-auto rounded-lg border border-border">
             <table className="w-full min-w-[480px] text-sm">
+              <caption className="sr-only">All-time ranking</caption>
               <thead>
                 <tr className="border-b border-border text-left text-muted-foreground">
-                  <th className="px-3 py-2">#</th>
-                  <th className="px-3 py-2">Player</th>
-                  <th className="px-3 py-2 text-right">Titles</th>
-                  <th className="px-3 py-2 text-right">Match W-L</th>
-                  <th className="px-3 py-2 text-right">Win %</th>
-                  <th className="px-3 py-2 text-right">Leg Diff</th>
+                  <th scope="col" className="px-3 py-2">#</th>
+                  <th scope="col" className="px-3 py-2">Player</th>
+                  <th scope="col" className="px-3 py-2 text-right">Titles</th>
+                  <th scope="col" className="px-3 py-2 text-right">Match W-L</th>
+                  <th scope="col" className="px-3 py-2 text-right">Win %</th>
+                  <th scope="col" className="px-3 py-2 text-right">Leg Diff</th>
                 </tr>
               </thead>
               <tbody>
@@ -66,18 +74,46 @@ export function HistoryPage() {
         ) : (
           <div className="flex flex-col gap-2">
             {tournaments.map((t) => (
-              <Link
+              <div
                 key={t.id}
-                to={`/tournaments/${t.id}`}
-                className="flex min-h-11 items-center justify-between rounded-lg border border-border px-4 py-3 hover:bg-muted"
+                className="flex items-center gap-2 rounded-lg border border-border px-4 py-2 transition-colors hover:bg-muted"
               >
-                <span className="font-medium">{t.name}</span>
-                <Badge variant="outline">{t.type === "league" ? "League" : "Knockout"}</Badge>
-              </Link>
+                <Link to={`/tournaments/${t.id}`} className="flex min-h-11 flex-1 items-center justify-between gap-2">
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium">{t.name}</span>
+                    {t.completedAt && (
+                      <span className="block text-xs text-muted-foreground">
+                        {new Date(t.completedAt).toLocaleDateString()}
+                      </span>
+                    )}
+                  </span>
+                  <Badge variant="outline">{t.type === "league" ? "League" : "Knockout"}</Badge>
+                </Link>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="min-h-11 min-w-11 shrink-0"
+                  aria-label={`Share ${t.name} on WhatsApp`}
+                  title="Share results"
+                  onClick={() => setShareTournament(t)}
+                >
+                  <Share2 />
+                </Button>
+              </div>
             ))}
           </div>
         )}
       </section>
+
+      {shareTournament && (
+        <ShareDialog
+          open
+          onOpenChange={(o) => !o && setShareTournament(null)}
+          tournament={shareTournament}
+          results={results.filter((r) => r.tournamentId === shareTournament.id)}
+          players={players}
+        />
+      )}
     </div>
   )
 }

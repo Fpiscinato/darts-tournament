@@ -41,6 +41,30 @@ describe("parseBackupFile", () => {
     const future = { schemaVersion: 999, createdAt: new Date().toISOString(), data: { players: [], tournaments: [], matches: [], results: [], settings: [] } }
     expect(() => parseBackupFile(JSON.stringify(future))).toThrow(BackupError)
   })
+
+  it("rejects a backup whose rows are malformed", () => {
+    const broken = {
+      schemaVersion: 1,
+      createdAt: new Date().toISOString(),
+      data: { players: [{ id: 42, name: "Nope" }], tournaments: [], matches: [], results: [] },
+    }
+    expect(() => parseBackupFile(JSON.stringify(broken))).toThrow(BackupError)
+    expect(() => parseBackupFile(JSON.stringify(broken))).toThrow(/backup/)
+  })
+
+  it("rejects a backup whose data field is missing", () => {
+    expect(() => parseBackupFile(JSON.stringify({ schemaVersion: 1, createdAt: "x" }))).toThrow(BackupError)
+  })
+
+  it("accepts a backup without a settings array and defaults it to empty", () => {
+    const noSettings = {
+      schemaVersion: 1,
+      createdAt: new Date().toISOString(),
+      data: { players: [], tournaments: [], matches: [], results: [] },
+    }
+    const parsed = parseBackupFile(JSON.stringify(noSettings))
+    expect(parsed.data.settings).toEqual([])
+  })
 })
 
 describe("fullReset", () => {

@@ -26,12 +26,33 @@ export interface Player {
   updatedAt: string
 }
 
+/** Pre-withdrawal snapshot of a match the player hadn't finished, restored
+ * verbatim if they rejoin. */
+export interface WithdrawnMatchSnapshot {
+  id: string
+  previousStatus: MatchStatus
+  player1Legs: number
+  player2Legs: number
+}
+
+export interface TournamentWithdrawal {
+  playerId: string
+  /** When the player quit. */
+  at: string
+  /** Matches resolved as a walkover because of this withdrawal. */
+  matches: WithdrawnMatchSnapshot[]
+}
+
 export interface Tournament {
   id: string
   name: string
   type: TournamentType
   status: TournamentStatus
   playerIds: string[]
+  /** Players who quit mid-tournament (results so far stand, remaining
+   * matches become walkovers). Absent on tournaments created before this
+   * field existed — always read as `[]`. */
+  withdrawals?: TournamentWithdrawal[]
   /** Only meaningful when type === "league". */
   finalsFormat: LeagueFinalsFormat | null
   /** Only meaningful when type === "knockout". */
@@ -63,6 +84,9 @@ export interface Match {
   nextMatchId: string | null
   nextMatchSlot: 1 | 2 | null
   confirmedAt: string | null
+  /** Set when the match was decided by a walkover (an opponent withdrew) —
+   * no legs were thrown, the score stays 0–0. */
+  walkover?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -80,6 +104,8 @@ export interface TournamentPlayerResult {
   legsAgainst: number
   playoffRequired: boolean
   titleWon: boolean
+  /** The player quit before the tournament ended. */
+  withdrawn?: boolean
   createdAt: string
 }
 

@@ -4,6 +4,7 @@ import { Plus } from "lucide-react"
 import { db } from "@/lib/db"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { PageSkeleton } from "@/components/darts/PageSkeleton"
 import type { Tournament } from "@/lib/types"
 
 function StatusBadge({ status }: { status: Tournament["status"] }) {
@@ -18,7 +19,7 @@ export function HomePage() {
     [],
   )
 
-  if (!tournaments) return null
+  if (!tournaments) return <PageSkeleton rows={4} className="mx-auto max-w-2xl px-4 py-6" />
 
   const active = tournaments.filter((t) => t.status !== "completed")
   const completed = tournaments.filter((t) => t.status === "completed")
@@ -27,11 +28,11 @@ export function HomePage() {
     <div className="mx-auto max-w-2xl px-4 py-6">
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-semibold">Tournaments</h1>
-        <Link to="/tournaments/new">
-          <Button className="min-h-11">
+        <Button asChild className="min-h-11">
+          <Link to="/tournaments/new">
             <Plus /> New Tournament
-          </Button>
-        </Link>
+          </Link>
+        </Button>
       </div>
 
       {tournaments.length === 0 && (
@@ -46,7 +47,7 @@ export function HomePage() {
               <Link
                 key={t.id}
                 to={`/tournaments/${t.id}`}
-                className="flex min-h-11 items-center justify-between rounded-lg border border-border px-4 py-3 hover:bg-muted"
+                className="flex min-h-11 items-center justify-between rounded-lg border border-border px-4 py-3 transition-colors hover:bg-muted"
               >
                 <span className="font-medium">{t.name}</span>
                 <div className="flex items-center gap-2">
@@ -67,7 +68,7 @@ export function HomePage() {
               <Link
                 key={t.id}
                 to={`/tournaments/${t.id}`}
-                className="flex min-h-11 items-center justify-between rounded-lg border border-border px-4 py-3 hover:bg-muted"
+                className="flex min-h-11 items-center justify-between rounded-lg border border-border px-4 py-3 transition-colors hover:bg-muted"
               >
                 <span className="font-medium">{t.name}</span>
                 <div className="flex items-center gap-2">

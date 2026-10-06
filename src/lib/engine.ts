@@ -2,7 +2,7 @@ import { db } from "./db"
 import { isValidCompletedScore, legsToWin } from "./format"
 import { generateKnockoutRound1, totalRounds as knockoutTotalRounds } from "./knockout"
 import { computeStandings, generateRoundRobinFixtures } from "./roundRobin"
-import type { BestOf, Match, Stage, Tournament, TournamentPlayerResult } from "./types"
+import type { BestOf, Match, Stage, Tournament, TournamentPlayerResult, TournamentWithdrawal } from "./types"
 
 export class EngineError extends Error {}
 
@@ -228,6 +228,26 @@ async function allMatchesInStageCompleted(tournamentId: string, stage: Stage): P
   return stageMatches.every((m) => m.status === "completed")
 }
 
+/** Stages that only exist because an earlier stage finished (used to roll
+ * advancement back on undo, and to make advancement idempotent). */
+const LATER_STAGES: Record<Stage, Stage[]> = {
+  league: ["top4", "final", "knockout"],
+  top4: ["final"],
+  final: [],
+  knockout: [],
+}
+
+async function laterStageMatchesExist(tournamentId: string, stage: Stage): Promise<boolean> {
+  const later = LATER_STAGES[stage]
+  if (later.length === 0) return false
+  const count = await db.matches
+    .where("tournamentId")
+    .equals(tournamentId)
+    .and((m) => later.includes(m.stage))
+    .count()
+  return count > 0
+}
+
 /** Called after a league (or top4) stage finishes, to build whichever
  * finals stage the tournament's finalsFormat calls for — or to finish the
  * tournament outright for "league_winner". */
@@ -238,6 +258,13 @@ async function advanceLeagueStage(tournament: Tournament): Promise<void> {
     .and((m) => m.stage === "league")
     .toArray()
   const standings = computeStandings(tournament.playerIds, leagueMatches)
+
+  // Idempotency guard: if the finals stage already exists (two tabs confirming
+  // the last league match at once, or an earlier partial advance), building it
+  // again would duplicate every match.
+  if (tournament.finalsFormat !== "league_winner" && (await laterStageMatchesExist(tournament.id, "league"))) {
+    return
+  }
 
   switch (tournament.finalsFormat) {
     case "league_winner": {
@@ -274,6 +301,7 @@ async function advanceLeagueStage(tournament: Tournament): Promise<void> {
 }
 
 async function advanceTop4Stage(tournament: Tournament): Promise<void> {
+  if (await laterStageMatchesExist(tournament.id, "top4")) return
   const top4Matches = await db.matches
     .where("tournamentId")
     .equals(tournament.id)
@@ -288,59 +316,64 @@ async function advanceTop4Stage(tournament: Tournament): Promise<void> {
   await db.matches.add(buildFinalMatch(tournament.id, p1.playerId, p2.playerId, bestOf))
 }
 
-export async function confirmMatch(matchId: string, player1Legs: number, player2Legs: number): Promise<void> {
-  const match = await db.matches.get(matchId)
-  if (!match) throw new EngineError("Match not found")
-  if (match.status === "completed") throw new EngineError("Match already confirmed")
-  if (!match.player1Id || !match.player2Id) throw new EngineError("Match is not ready (missing a player)")
-  if (!isValidCompletedScore(match.bestOf, player1Legs, player2Legs)) {
-    throw new EngineError(`Invalid score for best of ${match.bestOf} (first to ${match.legsToWin})`)
-  }
-
-  const winnerId = player1Legs > player2Legs ? match.player1Id : match.player2Id
+/** Must run inside a "rw" transaction covering matches/tournaments/results.
+ * Applies a winner to the match, feeds the bracket forward, then runs the
+ * stage-completion checks (advance the finals stage / finish the tournament).
+ * Shared by confirmMatch and by walkover resolution (player withdrawals). */
+async function completeMatchWithWinner(
+  match: Match,
+  winnerId: string,
+  patch: { player1Legs: number; player2Legs: number; walkover?: boolean; confirmedAt: string | null },
+): Promise<void> {
   const timestamp = nowISO()
+  await db.matches.update(match.id, {
+    ...patch,
+    winnerId,
+    status: "completed",
+    updatedAt: timestamp,
+  })
 
-  await db.transaction("rw", db.matches, db.tournaments, db.results, async () => {
-    await db.matches.update(matchId, {
-      player1Legs,
-      player2Legs,
-      winnerId,
-      status: "completed",
-      confirmedAt: timestamp,
+  if (match.nextMatchId && match.nextMatchSlot) {
+    await db.matches.update(match.nextMatchId, {
+      [match.nextMatchSlot === 1 ? "player1Id" : "player2Id"]: winnerId,
       updatedAt: timestamp,
     })
+  }
 
-    if (match.nextMatchId && match.nextMatchSlot) {
-      await db.matches.update(match.nextMatchId, {
-        [match.nextMatchSlot === 1 ? "player1Id" : "player2Id"]: winnerId,
-        updatedAt: timestamp,
-      })
+  const tournament = await db.tournaments.get(match.tournamentId)
+  if (!tournament) return
+
+  if (match.stage === "league" && (await allMatchesInStageCompleted(tournament.id, "league"))) {
+    await advanceLeagueStage(tournament)
+  } else if (match.stage === "top4" && (await allMatchesInStageCompleted(tournament.id, "top4"))) {
+    await advanceTop4Stage(tournament)
+  } else if (match.stage === "final") {
+    await finishTournament(tournament.id)
+  } else if (match.stage === "knockout" && tournament.type === "knockout" && match.nextMatchId === null) {
+    // Standalone knockout tournament: no next match means this was the final.
+    await finishTournament(tournament.id)
+  } else if (match.stage === "knockout" && tournament.type === "league" && match.nextMatchId === null) {
+    // top4_knockout finals: the mini-bracket's final has no next match.
+    await finishTournament(tournament.id)
+  }
+}
+
+export async function confirmMatch(matchId: string, player1Legs: number, player2Legs: number): Promise<void> {
+  const timestamp = nowISO()
+
+  // The match is read *inside* the transaction so two tabs confirming at the
+  // same time can't both pass the "still pending" check and double-advance.
+  await db.transaction("rw", db.matches, db.tournaments, db.results, async () => {
+    const match = await db.matches.get(matchId)
+    if (!match) throw new EngineError("Match not found")
+    if (match.status === "completed") throw new EngineError("Match already confirmed")
+    if (!match.player1Id || !match.player2Id) throw new EngineError("Match is not ready (missing a player)")
+    if (!isValidCompletedScore(match.bestOf, player1Legs, player2Legs)) {
+      throw new EngineError(`Invalid score for best of ${match.bestOf} (first to ${match.legsToWin})`)
     }
 
-    const tournament = await db.tournaments.get(match.tournamentId)
-    if (!tournament) return
-
-    if (match.stage === "league" && (await allMatchesInStageCompleted(tournament.id, "league"))) {
-      await advanceLeagueStage(tournament)
-    } else if (match.stage === "top4" && (await allMatchesInStageCompleted(tournament.id, "top4"))) {
-      await advanceTop4Stage(tournament)
-    } else if (match.stage === "final") {
-      await finishTournament(tournament.id)
-    } else if (
-      match.stage === "knockout" &&
-      tournament.type === "knockout" &&
-      match.nextMatchId === null
-    ) {
-      // Standalone knockout tournament: no next match means this was the final.
-      await finishTournament(tournament.id)
-    } else if (
-      match.stage === "knockout" &&
-      tournament.type === "league" &&
-      match.nextMatchId === null
-    ) {
-      // top4_knockout finals: the mini-bracket's final has no next match.
-      await finishTournament(tournament.id)
-    }
+    const winnerId = player1Legs > player2Legs ? match.player1Id : match.player2Id
+    await completeMatchWithWinner(match, winnerId, { player1Legs, player2Legs, confirmedAt: timestamp })
   })
 }
 
@@ -414,6 +447,7 @@ export async function finishTournament(tournamentId: string): Promise<void> {
   const positionByPlayer = new Map(rankedRemaining.map((playerId, i) => [playerId, i + 3]))
 
   const timestamp = nowISO()
+  const withdrawnIds = new Set((tournament.withdrawals ?? []).map((w) => w.playerId))
   const results: TournamentPlayerResult[] = tournament.playerIds.map((playerId) => ({
     id: uid(),
     tournamentId,
@@ -427,6 +461,7 @@ export async function finishTournament(tournamentId: string): Promise<void> {
     legsAgainst: legsAgainst.get(playerId) ?? 0,
     playoffRequired: leagueStandings.find((r) => r.playerId === playerId)?.playoffRequired ?? false,
     titleWon: championId === playerId,
+    withdrawn: withdrawnIds.has(playerId),
     createdAt: timestamp,
   }))
 
@@ -442,6 +477,43 @@ export async function finishTournament(tournamentId: string): Promise<void> {
 export interface UndoResult {
   ok: boolean
   reason?: string
+}
+
+const STAGE_NAME: Record<Stage, string> = {
+  league: "League",
+  top4: "Top 4",
+  final: "Final",
+  knockout: "Knockout",
+}
+
+/** First match of a stage that exists *after* `stage` in the tournament flow
+ * that has already been started or confirmed. Re-generating that stage would
+ * silently corrupt results the organiser already entered — callers must refuse
+ * instead of rolling back. */
+async function firstStartedLaterMatch(tournamentId: string, stage: Stage): Promise<Match | null> {
+  const later = LATER_STAGES[stage]
+  if (later.length === 0) return null
+  const blocking = await db.matches
+    .where("tournamentId")
+    .equals(tournamentId)
+    .and((m) => later.includes(m.stage) && m.status !== "pending")
+    .first()
+  return blocking ?? null
+}
+
+/** Drops the not-yet-played matches of the stages that only exist because
+ * `stage` was complete, so the next confirmation regenerates them from the
+ * current table instead of duplicating them. Callers must have checked with
+ * `firstStartedLaterMatch` that nothing there has been played yet. Must run
+ * inside a transaction that owns db.matches. */
+async function rollbackLaterStages(tournamentId: string, stage: Stage): Promise<void> {
+  const later = LATER_STAGES[stage]
+  if (later.length === 0) return
+  await db.matches
+    .where("tournamentId")
+    .equals(tournamentId)
+    .and((m) => later.includes(m.stage) && m.status === "pending")
+    .delete()
 }
 
 /** Reopens the most recently confirmed match in a tournament, recalculating
@@ -471,10 +543,22 @@ export async function undoLastConfirmedResult(tournamentId: string): Promise<Und
     return { ok: false, reason: "Cannot undo: this tournament is finished. Reopen it first." }
   }
 
+  const blocking = await firstStartedLaterMatch(tournamentId, match.stage)
+  if (blocking) {
+    return {
+      ok: false,
+      reason: `Cannot undo: the ${STAGE_NAME[blocking.stage]} stage was built from a completed ${STAGE_NAME[match.stage]} table and has already started. Undo or reset those results first.`,
+    }
+  }
+
   const timestamp = nowISO()
   await db.transaction("rw", db.matches, async () => {
+    // Score goes back to 0–0 (same as a match reset) so the scoring screen
+    // reopens clean instead of "decided" with the old, wrong score.
     await db.matches.update(match.id, {
-      status: "in_progress",
+      status: "pending",
+      player1Legs: 0,
+      player2Legs: 0,
       winnerId: null,
       confirmedAt: null,
       updatedAt: timestamp,
@@ -485,6 +569,144 @@ export async function undoLastConfirmedResult(tournamentId: string): Promise<Und
         updatedAt: timestamp,
       })
     }
+    if (!(await allMatchesInStageCompleted(tournamentId, match.stage))) {
+      await rollbackLaterStages(tournamentId, match.stage)
+    }
+  })
+
+  return { ok: true }
+}
+
+export function withdrawnPlayerIds(tournament: Tournament): string[] {
+  return (tournament.withdrawals ?? []).map((w) => w.playerId)
+}
+
+/** Marks a player as having quit mid-tournament. Results they already
+ * earned stay on the board; every match they haven't finished yet is awarded
+ * to the opponent as a walkover (0–0, no legs) so brackets and tables keep
+ * moving. Reversible with rejoinPlayer while the tournament is active. */
+export async function withdrawPlayer(tournamentId: string, playerId: string): Promise<UndoResult> {
+  const tournament = await db.tournaments.get(tournamentId)
+  if (!tournament) return { ok: false, reason: "Tournament not found" }
+  if (tournament.status !== "active") {
+    return { ok: false, reason: "Players can only withdraw while the tournament is active." }
+  }
+  if (!tournament.playerIds.includes(playerId)) {
+    return { ok: false, reason: "Player is not in this tournament" }
+  }
+  if ((tournament.withdrawals ?? []).some((w) => w.playerId === playerId)) {
+    return { ok: false, reason: "Player has already withdrawn" }
+  }
+
+  const unfinished = await db.matches
+    .where({ tournamentId })
+    .and((m) => m.status !== "completed" && (m.player1Id === playerId || m.player2Id === playerId))
+    .toArray()
+
+  const withdrawal: TournamentWithdrawal = {
+    playerId,
+    at: nowISO(),
+    matches: unfinished.map((m) => ({
+      id: m.id,
+      previousStatus: m.status,
+      player1Legs: m.player1Legs,
+      player2Legs: m.player2Legs,
+    })),
+  }
+
+  await db.transaction("rw", db.tournaments, db.matches, db.results, async () => {
+    const current = await db.tournaments.get(tournamentId)
+    if (!current) return
+    await db.tournaments.update(tournamentId, {
+      withdrawals: [...(current.withdrawals ?? []), withdrawal],
+      updatedAt: nowISO(),
+    })
+    for (const m of unfinished) {
+      const opponentId = m.player1Id === playerId ? m.player2Id : m.player1Id
+      if (!opponentId) continue
+      await completeMatchWithWinner(m, opponentId, {
+        player1Legs: 0,
+        player2Legs: 0,
+        walkover: true,
+        // Walkovers are never "undo" targets — rejoining is how they revert.
+        confirmedAt: null,
+      })
+    }
+  })
+
+  return { ok: true }
+}
+
+/** Undoes a withdrawal: every match it resolved goes back to exactly how it
+ * was (including a half-played score), and any finals stage generated from a
+ * table that is no longer complete is removed so it regenerates correctly. */
+export async function rejoinPlayer(tournamentId: string, playerId: string): Promise<UndoResult> {
+  const tournament = await db.tournaments.get(tournamentId)
+  if (!tournament) return { ok: false, reason: "Tournament not found" }
+  const withdrawal = (tournament.withdrawals ?? []).find((w) => w.playerId === playerId)
+  if (!withdrawal) return { ok: false, reason: "Player has not withdrawn from this tournament" }
+  if (tournament.status === "completed") {
+    return { ok: false, reason: "Cannot rejoin: this tournament is finished. Reopen it first." }
+  }
+
+  const all = await db.matches.where({ tournamentId }).toArray()
+  const toRevert = withdrawal.matches
+    .map((s) => ({ snapshot: s, match: all.find((m) => m.id === s.id) }))
+    .filter((x): x is { snapshot: (typeof withdrawal.matches)[number]; match: Match } => x.match !== undefined)
+
+  const affectedStages = new Set<Stage>()
+  for (const { match } of toRevert) {
+    affectedStages.add(match.stage)
+    if (match.nextMatchId) {
+      const next = all.find((m) => m.id === match.nextMatchId)
+      if (next && next.status === "completed") {
+        return {
+          ok: false,
+          reason: "Cannot rejoin: an opponent already advanced from this walkover and has since confirmed another result. Undo that result first.",
+        }
+      }
+    }
+  }
+  for (const stage of affectedStages) {
+    const blocking = await firstStartedLaterMatch(tournamentId, stage)
+    if (blocking) {
+      return {
+        ok: false,
+        reason: `Cannot rejoin: the ${STAGE_NAME[blocking.stage]} stage has already started. Undo or reset those results first.`,
+      }
+    }
+  }
+
+  const timestamp = nowISO()
+  await db.transaction("rw", db.tournaments, db.matches, async () => {
+    for (const { snapshot, match } of toRevert) {
+      await db.matches.update(snapshot.id, {
+        status: snapshot.previousStatus,
+        player1Legs: snapshot.player1Legs,
+        player2Legs: snapshot.player2Legs,
+        winnerId: null,
+        confirmedAt: null,
+        walkover: false,
+        updatedAt: timestamp,
+      })
+      if (match.nextMatchId && match.nextMatchSlot) {
+        await db.matches.update(match.nextMatchId, {
+          [match.nextMatchSlot === 1 ? "player1Id" : "player2Id"]: null,
+          updatedAt: timestamp,
+        })
+      }
+    }
+    for (const stage of affectedStages) {
+      if (!(await allMatchesInStageCompleted(tournamentId, stage))) {
+        await rollbackLaterStages(tournamentId, stage)
+      }
+    }
+    const current = await db.tournaments.get(tournamentId)
+    if (!current) return
+    await db.tournaments.update(tournamentId, {
+      withdrawals: (current.withdrawals ?? []).filter((w) => w.playerId !== playerId),
+      updatedAt: timestamp,
+    })
   })
 
   return { ok: true }

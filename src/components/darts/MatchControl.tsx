@@ -7,6 +7,7 @@ import { useToast } from "@/context/ToastContext"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { DartHitEffect } from "./DartHitEffect"
+import { PageSkeleton } from "./PageSkeleton"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,56 +25,102 @@ function usePlayerName(id: string | null): string {
 }
 
 export function MatchControl({ matchId, onClose }: { matchId: string; onClose: () => void }) {
-  const match = useLiveQuery(() => db.matches.get(matchId), [matchId])
+  const matchRow = useLiveQuery(async () => {
+    const m = await db.matches.get(matchId)
+    return m ?? null
+  }, [matchId])
   const [history, setHistory] = useState<(1 | 2)[]>([])
   const [confirmReset, setConfirmReset] = useState(false)
   const [confirmUndoLast, setConfirmUndoLast] = useState(false)
   const [hitP1, setHitP1] = useState(0)
   const [hitP2, setHitP2] = useState(0)
+  const [working, setWorking] = useState(false)
   const { notify } = useToast()
 
-  const p1Name = usePlayerName(match?.player1Id ?? null)
-  const p2Name = usePlayerName(match?.player2Id ?? null)
+  const p1Name = usePlayerName(matchRow?.player1Id ?? null)
+  const p2Name = usePlayerName(matchRow?.player2Id ?? null)
 
   useEffect(() => {
     setHistory([])
   }, [matchId])
 
-  if (!match) return null
+  useEffect(() => {
+    if (matchRow === null) onClose()
+  }, [matchRow, onClose])
+
+  if (matchRow === undefined) {
+    return <PageSkeleton rows={3} className="mx-auto max-w-3xl px-4 py-6" />
+  }
+  if (matchRow === null) return null
+  const match = matchRow
 
   const decided = isValidCompletedScore(match.bestOf, match.player1Legs, match.player2Legs)
   const someoneWon = match.player1Legs >= match.legsToWin || match.player2Legs >= match.legsToWin
   const p1Won = match.player1Legs >= match.legsToWin
   const p2Won = match.player2Legs >= match.legsToWin
 
+  async function bumpLeg(slot: 1 | 2, dir: 1 | -1) {
+    // Read-modify-write runs inside a single transaction, so a second tab
+    // (or a late refresh) can't race the increment and lose a leg.
+    await db.transaction("rw", db.matches, async () => {
+      const m = await db.matches.get(match.id)
+      if (!m) return
+      await db.matches.update(m.id, {
+        ...(slot === 1
+          ? { player1Legs: Math.max(0, m.player1Legs + dir) }
+          : { player2Legs: Math.max(0, m.player2Legs + dir) }),
+        ...(dir === 1 ? { status: "in_progress" as const } : {}),
+        updatedAt: new Date().toISOString(),
+      })
+    })
+  }
+
   async function winLeg(slot: 1 | 2) {
-    if (!match || someoneWon) return
-    const patch =
-      slot === 1 ? { player1Legs: match.player1Legs + 1 } : { player2Legs: match.player2Legs + 1 }
-    await db.matches.update(match.id, { ...patch, status: "in_progress", updatedAt: new Date().toISOString() })
-    setHistory((h) => [...h, slot])
-    if (slot === 1) setHitP1((n) => n + 1)
-    else setHitP2((n) => n + 1)
+    if (!match || someoneWon || working) return
+    setWorking(true)
+    try {
+      await bumpLeg(slot, 1)
+      setHistory((h) => [...h, slot])
+      if (slot === 1) setHitP1((n) => n + 1)
+      else setHitP2((n) => n + 1)
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Could not record the leg", "destructive")
+    } finally {
+      setWorking(false)
+    }
   }
 
   async function undoLastLeg() {
-    if (!match || history.length === 0) return
+    if (!match || history.length === 0 || working) return
     const last = history[history.length - 1]
-    const patch = last === 1 ? { player1Legs: Math.max(0, match.player1Legs - 1) } : { player2Legs: Math.max(0, match.player2Legs - 1) }
-    await db.matches.update(match.id, { ...patch, updatedAt: new Date().toISOString() })
-    setHistory((h) => h.slice(0, -1))
+    setWorking(true)
+    try {
+      await bumpLeg(last, -1)
+      setHistory((h) => h.slice(0, -1))
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Could not undo the leg", "destructive")
+    } finally {
+      setWorking(false)
+    }
   }
 
   async function resetCurrentMatch() {
-    if (!match) return
-    await db.matches.update(match.id, {
-      player1Legs: 0,
-      player2Legs: 0,
-      status: "pending",
-      updatedAt: new Date().toISOString(),
-    })
-    setHistory([])
-    setConfirmReset(false)
+    if (!match || working) return
+    setWorking(true)
+    try {
+      await db.matches.update(match.id, {
+        player1Legs: 0,
+        player2Legs: 0,
+        status: "pending",
+        updatedAt: new Date().toISOString(),
+      })
+      setHistory([])
+      setConfirmReset(false)
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Could not reset the match", "destructive")
+    } finally {
+      setWorking(false)
+    }
   }
 
   async function handleConfirm() {
@@ -121,8 +168,10 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
         >
           <DartHitEffect triggerKey={hitP1} />
           <span className="truncate text-center font-medium">{p1Name}</span>
-          <span className="text-4xl font-bold tabular-nums">{match.player1Legs}</span>
-          <Button className="min-h-11 w-full" disabled={someoneWon} onClick={() => winLeg(1)}>
+          <span key={`${match.id}-p1-${match.player1Legs}`} className={cn("animate-leg-pop text-4xl font-bold tabular-nums", p1Won && "text-emerald-500")}>
+            {match.player1Legs}
+          </span>
+          <Button className="min-h-11 w-full" disabled={someoneWon || working} onClick={() => winLeg(1)}>
             {p1Name} Wins Leg
           </Button>
         </div>
@@ -134,31 +183,33 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
         >
           <DartHitEffect triggerKey={hitP2} />
           <span className="truncate text-center font-medium">{p2Name}</span>
-          <span className="text-4xl font-bold tabular-nums">{match.player2Legs}</span>
-          <Button className="min-h-11 w-full" disabled={someoneWon} onClick={() => winLeg(2)}>
+          <span key={`${match.id}-p2-${match.player2Legs}`} className={cn("animate-leg-pop text-4xl font-bold tabular-nums", p2Won && "text-emerald-500")}>
+            {match.player2Legs}
+          </span>
+          <Button className="min-h-11 w-full" disabled={someoneWon || working} onClick={() => winLeg(2)}>
             {p2Name} Wins Leg
           </Button>
         </div>
       </div>
 
       <div className="flex flex-col gap-3">
-        <Button
-          size="lg"
-          className={cn("min-h-11", decided && "ring-2 ring-emerald-500 ring-offset-2 ring-offset-background")}
-          disabled={!decided}
-          onClick={handleConfirm}
-        >
-          {decided ? "Confirm Result — winner decided" : "Confirm Result"}
-        </Button>
+<Button
+            size="lg"
+            className={cn("min-h-11", decided && "ring-2 ring-emerald-500 ring-offset-2 ring-offset-background")}
+            disabled={!decided || working}
+            onClick={handleConfirm}
+          >
+            {decided ? "Confirm Result — winner decided" : "Confirm Result"}
+          </Button>
 
-        <div className="grid grid-cols-2 gap-3">
-          <Button variant="outline" className="min-h-11" disabled={history.length === 0} onClick={undoLastLeg}>
-            Undo Last Leg
-          </Button>
-          <Button variant="outline" className="min-h-11" onClick={() => setConfirmReset(true)}>
-            Reset Current Match
-          </Button>
-        </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Button variant="outline" className="min-h-11" disabled={history.length === 0 || working} onClick={undoLastLeg}>
+              Undo Last Leg
+            </Button>
+            <Button variant="outline" className="min-h-11" disabled={working} onClick={() => setConfirmReset(true)}>
+              Reset Current Match
+            </Button>
+          </div>
 
         <Button variant="destructive" className="min-h-11" onClick={() => setConfirmUndoLast(true)}>
           Undo Last Confirmed Result

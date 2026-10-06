@@ -21,7 +21,12 @@ Dexie.js + Vitest.
   fallback).
 - Undo the last confirmed result, with dependency checks so you can't
   silently corrupt a bracket or table.
+- **Player withdrawals** mid-tournament: results already earned stay on the
+  board, unfinished matches become walkovers, and the player can rejoin
+  later (their matches are restored exactly as they were).
+- One-tap **WhatsApp share** of the final results for a finished tournament.
 - All-time player ranking across every finished tournament.
+- Light, dark and system appearance themes.
 - JSON backup export/import, and a full local reset.
 
 ## Architecture
@@ -36,7 +41,8 @@ src/lib/
   engine.ts      stage orchestration: start/confirm/undo/finish a tournament
   players.ts     player CRUD (duplicate-name guard, delete-or-archive)
   ranking.ts     all-time ranking sort cascade
-  backup.ts      export/import/reset
+  backup.ts      zod-validated export/import/reset
+  share.ts       WhatsApp share text (pt-BR) + clipboard helpers
 src/pages/       one page per route (players, new tournament, tournament, history, settings)
 src/components/darts/  MatchControl (scoring screen), BracketView, StandingsTable, MatchList
 ```
