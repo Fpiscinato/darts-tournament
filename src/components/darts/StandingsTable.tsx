@@ -69,8 +69,8 @@ export function StandingsTable({
                   )}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">{row.played}</td>
-                <td className="px-3 py-2 text-right tabular-nums">{row.wins}</td>
-                <td className="px-3 py-2 text-right tabular-nums">{row.losses}</td>
+                <td className="px-3 py-2 text-right font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">{row.wins}</td>
+                <td className="px-3 py-2 text-right font-semibold tabular-nums text-red-600 dark:text-red-400">{row.losses}</td>
                 <td className="px-3 py-2 text-right tabular-nums">
                   {row.legsFor}-{row.legsAgainst}
                 </td>

@@ -33,6 +33,17 @@ function uid(): string {
   return crypto.randomUUID()
 }
 
+/** Fallback name when the user leaves the field blank — date only, so the
+ * same name never appears twice and no clock time leaks into the share image. */
+function defaultTournamentName(): string {
+  const stamp = new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(new Date())
+  return `Darts Cup ${stamp}`
+}
+
 function Hint({ show, children, tone = "muted" }: { show: boolean; children: ReactNode; tone?: "muted" | "destructive" }) {
   if (!show) return null
   return (
@@ -87,7 +98,6 @@ export function NewTournamentPage() {
   const [finalBestOf, setFinalBestOf] = useState<BestOf>(5)
   const [knockoutBestOf, setKnockoutBestOf] = useState<BestOf>(5)
   const [creating, setCreating] = useState(false)
-  const [submitted, setSubmitted] = useState(false)
   const [cancelConfirm, setCancelConfirm] = useState(false)
 
   if (!players) return <PageSkeleton rows={5} className="mx-auto max-w-2xl px-4 py-6" />
@@ -98,7 +108,7 @@ export function NewTournamentPage() {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length < 16 ? [...prev, id] : prev))
   }
 
-  const canCreate = name.trim().length > 0 && selected.length >= 2 && selected.length <= 16
+  const canCreate = selected.length >= 2 && selected.length <= 16
 
   const format = FINALS_FORMATS.find((f) => f.value === finalsFormat)!
 
@@ -108,14 +118,13 @@ export function NewTournamentPage() {
   }
 
   async function handleCreate() {
-    setSubmitted(true)
     if (!canCreate || !players) return
     setCreating(true)
     let createdId: string | null = null
     try {
       const tournament: Tournament = {
         id: uid(),
-        name: name.trim(),
+        name: name.trim() || defaultTournamentName(),
         type,
         status: "draft",
         playerIds: selected,
@@ -166,9 +175,7 @@ export function NewTournamentPage() {
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2">
             <Label htmlFor="tournament-name">Name</Label>
-            <Hint show={submitted && name.trim().length === 0} tone="destructive">
-              Type a name
-            </Hint>
+            <Hint show={name.trim().length === 0}>leave blank to auto-generate</Hint>
           </div>
           <Input id="tournament-name" value={name} onChange={(e) => setName(e.target.value)} className="min-h-11" />
         </div>

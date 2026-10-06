@@ -59,11 +59,11 @@ describe("buildShareText", () => {
     })
 
     expect(text).toContain("*Copa Darts 2026*")
-    expect(text).toContain("Liga")
-    expect(text).toContain("finalizado em")
-    expect(text).toContain("🥇 *1º Fernando* — 2V-0D · 4 pts · +3 legs")
-    expect(text).toContain("🥈 *2º João*")
-    expect(text).toContain("🥉 *3º Maria*")
+    expect(text).toContain("League")
+    expect(text).toContain("Finished on")
+    expect(text).toContain("🥇 *1st Fernando* — 2W-0L · 4 pts · +3 legs")
+    expect(text).toContain("🥈 *2nd João*")
+    expect(text).toContain("🥉 *3rd Maria*")
     expect(text).toContain("Darts Tournament Manager")
   })
 
@@ -82,14 +82,14 @@ describe("buildShareText", () => {
       players: [...players, { id: "p4", name: "Bruno", active: false, seed: null, createdAt: "", updatedAt: "" }],
     })
 
-    expect(text).toContain("*📊 Classificação completa*")
-    expect(text).toContain("4º Bruno ⚠️ — 0 pts (0V-3D)")
-    expect(text).toContain("⚠️ Bruno desistiu do torneio")
+    expect(text).toContain("*📊 Full ranking*")
+    expect(text).toContain("4th Bruno ⚠️ — 0 pts (0W-3L)")
+    expect(text).toContain("⚠️ Bruno withdrew from the tournament")
   })
 
   it("handles an empty result set without throwing", () => {
     const text = buildShareText({ tournament: makeTournament({ completedAt: null }), results: [], players })
     expect(text).toContain("*Copa Darts 2026*")
-    expect(text).not.toContain("finalizado em")
+    expect(text).not.toContain("Finished on")
   })
 })

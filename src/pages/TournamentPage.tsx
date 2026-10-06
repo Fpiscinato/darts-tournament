@@ -13,6 +13,8 @@ import { RosterDialog } from "@/components/darts/RosterDialog"
 import { ShareDialog } from "@/components/darts/ShareDialog"
 import { PageSkeleton } from "@/components/darts/PageSkeleton"
 import { Legend } from "@/components/darts/Legend"
+import { MEDALS } from "@/lib/shareRanking"
+import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -91,16 +93,11 @@ export function TournamentPage() {
   const stageOrder: Stage[] = ["league", "top4", "knockout", "final"]
   const naturalStages = stageOrder.filter((s) => stagesPresent.includes(s))
 
-  // Whichever stage still has work to do floats to the top; stages that are
-  // fully confirmed sink toward the bottom — same idea as the round
-  // ordering inside MatchList, applied one level up so a finished League
-  // table doesn't sit above the Top 4 / Final you're actually playing.
+  // Tabs always follow the tournament sequence — League → Top 4 → Final —
+  // regardless of which stage still has work to do, so the order never shifts
+  // mid-tournament. Pending counts on each tab show where the action is.
   const stageDone = (stage: Stage) => matches.filter((m) => m.stage === stage).every((m) => m.status === "completed")
-  const orderedStages = [...naturalStages].sort((a, b) => {
-    const aDone = stageDone(a) ? 1 : 0
-    const bDone = stageDone(b) ? 1 : 0
-    return aDone - bDone || naturalStages.indexOf(a) - naturalStages.indexOf(b)
-  })
+  const orderedStages = naturalStages
 
   // Deterministic "who plays who" preview: fixtures are generated up front, so
   // the next matches are simply the earliest pending ones, stage by stage.
@@ -261,39 +258,61 @@ export function TournamentPage() {
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-medium text-muted-foreground">Final results</h2>
           <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="w-full min-w-[360px] text-sm">
+            <table className="w-full min-w-[440px] text-sm">
                 <caption className="sr-only">Final results</caption>
                 <thead>
                   <tr className="border-b border-border text-left text-muted-foreground">
                     <th scope="col" className="px-3 py-2">Pos</th>
                     <th scope="col" className="px-3 py-2">Player</th>
                     <th scope="col" className="px-3 py-2 text-right">W-L</th>
+                    <th scope="col" className="px-3 py-2 text-right">Legs</th>
+                    <th scope="col" className="px-3 py-2 text-right">Diff</th>
                     <th scope="col" className="px-3 py-2 text-right">Pts</th>
                   </tr>
                 </thead>
               <tbody>
                 {[...results]
                   .sort((a, b) => (a.position ?? 99) - (b.position ?? 99))
-                  .map((r) => (
-                    <tr key={r.id} className="border-b border-border last:border-0">
-                      <td className="px-3 py-2">
-                        {r.position ?? "—"}
-                        {r.titleWon && " 🏆"}
-                      </td>
-                      <td className="px-3 py-2 font-medium">
-                        {nameOf(r.playerId)}
-                        {r.withdrawn && (
-                          <Badge variant="destructive" className="ml-2">
-                            WD
-                          </Badge>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums">
-                        {r.matchWins}-{r.matchLosses}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums">{r.points}</td>
-                    </tr>
-                  ))}
+                  .map((r) => {
+                    const diff = r.legsFor - r.legsAgainst
+                    return (
+                      <tr key={r.id} className="border-b border-border last:border-0">
+                        <td className="px-3 py-2">
+                          {r.position != null && r.position >= 1 && r.position <= 3 ? MEDALS[r.position - 1] : (r.position ?? "—")}
+                        </td>
+                        <td className="px-3 py-2 font-medium">
+                          {nameOf(r.playerId)}
+                          {r.titleWon && <span aria-label="champion"> 🏆</span>}
+                          {r.withdrawn && (
+                            <Badge variant="destructive" className="ml-2">
+                              WD
+                            </Badge>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <span className="font-semibold text-emerald-600 dark:text-emerald-400">{r.matchWins}</span>
+                          -
+                          <span className="font-semibold text-red-600 dark:text-red-400">{r.matchLosses}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                          {r.legsFor}-{r.legsAgainst}
+                        </td>
+                        <td
+                          className={cn(
+                            "px-3 py-2 text-right font-semibold tabular-nums",
+                            diff > 0
+                              ? "text-emerald-600 dark:text-emerald-400"
+                              : diff < 0
+                                ? "text-red-600 dark:text-red-400"
+                                : "text-muted-foreground",
+                          )}
+                        >
+                          {diff > 0 ? `+${diff}` : diff}
+                        </td>
+                        <td className="px-3 py-2 text-right font-semibold tabular-nums">{r.points}</td>
+                      </tr>
+                    )
+                  })}
               </tbody>
             </table>
           </div>

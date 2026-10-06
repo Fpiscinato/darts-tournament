@@ -53,7 +53,9 @@ export function HistoryPage() {
                     <td className="px-3 py-2 font-medium">{nameOf(row.playerId)}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{row.titles}</td>
                     <td className="px-3 py-2 text-right tabular-nums">
-                      {row.totalMatchWins}-{row.totalMatchLosses}
+                      <span className="font-semibold text-emerald-600 dark:text-emerald-400">{row.totalMatchWins}</span>
+                      -
+                      <span className="font-semibold text-red-600 dark:text-red-400">{row.totalMatchLosses}</span>
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">{Math.round(row.winRate * 100)}%</td>
                     <td className="px-3 py-2 text-right tabular-nums">

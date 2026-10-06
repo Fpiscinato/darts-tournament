@@ -4,15 +4,15 @@ import type { Player, Tournament, TournamentPlayerResult } from "./types"
 const MEDALS: Record<number, string> = { 1: "🥇", 2: "🥈", 3: "🥉" }
 
 const TYPE_LABEL: Record<string, string> = {
-  league: "Liga",
-  knockout: "Mata-mata",
+  league: "League",
+  knockout: "Knockout",
 }
 
 function formatDate(iso: string | null): string | null {
   if (!iso) return null
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return null
-  return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" })
+  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
 }
 
 function legDiffLabel(r: TournamentPlayerResult): string {
@@ -31,9 +31,9 @@ export interface ShareTournamentInput {
  * Builds a WhatsApp-formatted summary of a finished tournament (WhatsApp only
  * renders *bold*, _italic_ and line breaks — nothing else), e.g.:
  *
- *   🏆 *Copa Darts 2026*
- *   _Liga · finalizado em 06/10/2026_
- *   🥇 *1º Fernando* — 8V-2D · 16 pts · +12 legs
+ *   🏆 *Darts Cup 2026*
+ *   _League · Finished on 06 Oct 2026_
+ *   🥇 *1st Fernando* — 8W-2L · 16 pts · +12 legs
  *   …
  */
 export function buildShareText({ tournament, results, players }: ShareTournamentInput): string {
@@ -46,7 +46,7 @@ export function buildShareText({ tournament, results, players }: ShareTournament
   const meta: string[] = []
   meta.push(TYPE_LABEL[tournament.type] ?? tournament.type)
   const date = formatDate(tournament.completedAt)
-  if (date) meta.push(`finalizado em ${date}`)
+  if (date) meta.push(`Finished on ${date}`)
   lines.push(`_${meta.join(" · ")}_`)
   lines.push("")
 
@@ -54,8 +54,10 @@ export function buildShareText({ tournament, results, players }: ShareTournament
   const podium = ordered.filter((r) => r.position !== null && r.position <= 3).slice(0, 3)
   for (const r of podium) {
     const medal = MEDALS[r.position!] ?? ""
+    const suffix =
+      r.position! % 10 === 1 && r.position! % 100 !== 11 ? "st" : r.position! % 10 === 2 && r.position! % 100 !== 12 ? "nd" : r.position! % 10 === 3 && r.position! % 100 !== 13 ? "rd" : "th"
     lines.push(
-      `${medal} *${r.position}º ${nameOf(r.playerId)}* — ${r.matchWins}V-${r.matchLosses}D · ${r.points} pts · ${legDiffLabel(r)} legs`,
+      `${medal} *${r.position}${suffix} ${nameOf(r.playerId)}* — ${r.matchWins}W-${r.matchLosses}L · ${r.points} pts · ${legDiffLabel(r)} legs`,
     )
   }
   if (podium.length > 0) lines.push("")
@@ -63,11 +65,11 @@ export function buildShareText({ tournament, results, players }: ShareTournament
   // Everyone else, compact.
   const others = ordered.filter((r) => !podium.includes(r))
   if (others.length > 0) {
-    lines.push("*📊 Classificação completa*")
+    lines.push("*📊 Full ranking*")
     for (const r of others) {
-      const pos = r.position ? `${r.position}º` : "—"
+      const pos = r.position ? `${r.position}th` : "—"
       const wd = r.withdrawn ? " ⚠️" : ""
-      lines.push(`${pos} ${nameOf(r.playerId)}${wd} — ${r.points} pts (${r.matchWins}V-${r.matchLosses}D)`)
+      lines.push(`${pos} ${nameOf(r.playerId)}${wd} — ${r.points} pts (${r.matchWins}W-${r.matchLosses}L)`)
     }
     lines.push("")
   }
@@ -75,7 +77,7 @@ export function buildShareText({ tournament, results, players }: ShareTournament
   // Withdrawals spelled out (both a footnote and a marker on the row above).
   const withdrawnIds = (tournament.withdrawals ?? []).map((w) => w.playerId)
   for (const id of withdrawnIds) {
-    lines.push(`⚠️ ${nameOf(id)} desistiu do torneio`)
+    lines.push(`⚠️ ${nameOf(id)} withdrew from the tournament`)
   }
   if (withdrawnIds.length > 0) lines.push("")
 
@@ -83,7 +85,7 @@ export function buildShareText({ tournament, results, players }: ShareTournament
   const matchCount = ordered.reduce((sum, r) => sum + r.matchWins + r.matchLosses, 0) / 2
   if (matchCount > 0) {
     const bestOf = tournament.stageFormats.league ?? tournament.stageFormats.knockout
-    lines.push(`🎯 ${Math.round(matchCount)} jogos disputados${bestOf ? ` · Melhor de ${bestOf}` : ""}`)
+    lines.push(`🎯 ${Math.round(matchCount)} matches played${bestOf ? ` · Best of ${bestOf}` : ""}`)
   }
   lines.push("_Darts Tournament Manager_")
 

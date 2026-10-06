@@ -65,7 +65,7 @@ describe("buildRankingModel", () => {
     expect(model.rows[2].medal).toBe("🥉")
     expect(model.rows.map((r) => r.legDiff)).toEqual([4, -1, -3])
     expect(model.rows[0].wonTitle).toBe(true)
-    expect(model.dateLabel).toContain("06/10/2026")
+    expect(model.dateLabel).toContain("Oct 2026")
   })
 
   it("includes a withdrawal footnote", () => {
@@ -80,7 +80,7 @@ describe("buildRankingModel", () => {
       players,
     })
 
-    expect(model.notes).toEqual(["⚠️ Bruno desistiu do torneio"])
+    expect(model.notes).toEqual(["⚠️ Bruno withdrew from the tournament"])
     expect(model.rows[1].withdrawn).toBe(true)
   })
 
@@ -90,9 +90,9 @@ describe("buildRankingModel", () => {
       results: [],
       players,
     })
-    expect(knockout.typeLabel).toBe("Mata-mata")
+    expect(knockout.typeLabel).toBe("Knockout")
     expect(knockout.dateLabel).toBeNull()
 
-    expect(typeLabelOf(makeTournament())).toBe("Liga")
+    expect(typeLabelOf(makeTournament())).toBe("League")
   })
 })
