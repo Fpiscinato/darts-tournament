@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { useLiveQuery } from "dexie-react-hooks"
+import { ArrowLeft } from "lucide-react"
 import { db } from "@/lib/db"
 import { confirmMatch, undoLastConfirmedResult } from "@/lib/engine"
 import { isValidCompletedScore } from "@/lib/format"
@@ -8,6 +9,7 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { DartHitEffect } from "./DartHitEffect"
 import { PageSkeleton } from "./PageSkeleton"
+import { Legend } from "./Legend"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -152,11 +154,16 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
 
   return (
     <div className="flex flex-col gap-6 px-4 py-6">
-      <div className="flex items-center justify-between">
-        <Button variant="ghost" className="min-h-11" onClick={onClose}>
+      <div className="flex items-center justify-between gap-2">
+        <Button variant="outline" className="min-h-11" onClick={onClose}>
+          <ArrowLeft aria-hidden="true" />
           Back
         </Button>
-        <span className="text-sm text-muted-foreground">Best of {match.bestOf} · first to {match.legsToWin}</span>
+        <span className="text-sm text-muted-foreground">
+          <strong className="font-semibold text-foreground">{p1Name}</strong> ×{" "}
+          <strong className="font-semibold text-foreground">{p2Name}</strong> · Best of {match.bestOf} · first to{" "}
+          {match.legsToWin}
+        </span>
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -171,6 +178,16 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
           <span key={`${match.id}-p1-${match.player1Legs}`} className={cn("animate-leg-pop text-4xl font-bold tabular-nums", p1Won && "text-emerald-500")}>
             {match.player1Legs}
           </span>
+          {history.length > 0 && (
+            <div className="flex flex-wrap justify-center gap-1" aria-label="Leg history">
+              {history.map((winner, i) => (
+                <span
+                  key={i}
+                  className={cn("h-2 w-2 rounded-full", winner === 1 ? "bg-emerald-500" : "bg-muted-foreground/40")}
+                />
+              ))}
+            </div>
+          )}
           <Button className="min-h-11 w-full" disabled={someoneWon || working} onClick={() => winLeg(1)}>
             {p1Name} Wins Leg
           </Button>
@@ -186,11 +203,32 @@ export function MatchControl({ matchId, onClose }: { matchId: string; onClose: (
           <span key={`${match.id}-p2-${match.player2Legs}`} className={cn("animate-leg-pop text-4xl font-bold tabular-nums", p2Won && "text-emerald-500")}>
             {match.player2Legs}
           </span>
+          {history.length > 0 && (
+            <div className="flex flex-wrap justify-center gap-1" aria-label="Leg history">
+              {history.map((winner, i) => (
+                <span
+                  key={i}
+                  className={cn("h-2 w-2 rounded-full", winner === 2 ? "bg-emerald-500" : "bg-muted-foreground/40")}
+                />
+              ))}
+            </div>
+          )}
           <Button className="min-h-11 w-full" disabled={someoneWon || working} onClick={() => winLeg(2)}>
             {p2Name} Wins Leg
           </Button>
         </div>
       </div>
+
+      <Legend
+        items={[
+          { term: "First to", label: `${match.legsToWin} legs wins the match` },
+          { term: "Wins leg", label: "records one leg for that player" },
+          { term: "Undo last", label: "removes that player's most recent leg only" },
+          { term: "●", label: "one dot per leg won" },
+          { term: "Reset", label: "clears this score back to 0–0" },
+          { term: "✎", label: "already confirmed? use the pencil in the match list" },
+        ]}
+      />
 
       <div className="flex flex-col gap-3">
 <Button

@@ -1,6 +1,7 @@
 import { roundName } from "@/lib/knockout"
 import { ROUND_BADGE_CLASSES, ROUND_LINE_CLASSES } from "@/lib/roundColors"
 import type { Match } from "@/lib/types"
+import { Legend } from "@/components/darts/Legend"
 import { cn } from "@/lib/utils"
 
 const BOX_HEIGHT = "h-[70px]"
@@ -127,43 +128,63 @@ export function BracketView({
     }
   }
 
+  const hasBye = matches.some(
+    (m) => m.status === "completed" && (m.player1Id === null || m.player2Id === null),
+  )
+  const hasNeedsScore = matches.some(
+    (m) => m.status !== "completed" && m.player1Id && m.player2Id,
+  )
+  const hasFeeders = Object.values(feederOf).some((f) => f.slot1 || f.slot2)
+
   return (
-    <div className="flex items-stretch gap-0 overflow-x-auto pb-4">
-      {rounds.map((round, roundIndex) => {
-        const roundMatches = matches.filter((m) => m.round === round).sort((a, b) => a.bracketPosition - b.bracketPosition)
-        const isLast = roundIndex === rounds.length - 1
-        const lineColor = ROUND_LINE_CLASSES[roundIndex % ROUND_LINE_CLASSES.length]
+    <div>
+      <div className="flex items-stretch gap-0 overflow-x-auto pb-4">
+        {rounds.map((round, roundIndex) => {
+          const roundMatches = matches
+            .filter((m) => m.round === round)
+            .sort((a, b) => a.bracketPosition - b.bracketPosition)
+          const isLast = roundIndex === rounds.length - 1
+          const lineColor = ROUND_LINE_CLASSES[roundIndex % ROUND_LINE_CLASSES.length]
 
-        return (
-          <div key={round} className="flex shrink-0 items-stretch">
-            <div className="flex flex-col gap-2 pr-2">
-              <span
-                className={cn(
-                  "mb-1 w-fit rounded-full border px-2 py-0.5 text-xs font-semibold",
-                  ROUND_BADGE_CLASSES[roundIndex % ROUND_BADGE_CLASSES.length],
-                )}
-              >
-                {roundName(round, total)}
-              </span>
-              <div className="flex flex-1 flex-col justify-around gap-4">
-                {roundMatches.map((m) => (
-                  <MatchBox key={m.id} match={m} feeders={feederOf[m.id]} nameOf={nameOf} onSelect={onSelectMatch} />
-                ))}
+          return (
+            <div key={round} className="flex shrink-0 items-stretch">
+              <div className="flex flex-col gap-2 pr-2">
+                <span
+                  className={cn(
+                    "mb-1 w-fit rounded-full border px-2 py-0.5 text-xs font-semibold",
+                    ROUND_BADGE_CLASSES[roundIndex % ROUND_BADGE_CLASSES.length],
+                  )}
+                >
+                  {roundName(round, total)}
+                </span>
+                <div className="flex flex-1 flex-col justify-around gap-4">
+                  {roundMatches.map((m) => (
+                    <MatchBox key={m.id} match={m} feeders={feederOf[m.id]} nameOf={nameOf} onSelect={onSelectMatch} />
+                  ))}
+                </div>
               </div>
+
+              {!isLast && (
+                <div className="mt-7 flex flex-col justify-around gap-4">
+                  {Array.from({ length: Math.ceil(roundMatches.length / 2) }).map((_, i) => (
+                    <div key={i} className="flex flex-col justify-around" style={{ height: `${2 * 70 + 16}px` }}>
+                      <Connector colorClass={lineColor} />
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-
-            {!isLast && (
-              <div className="mt-7 flex flex-col justify-around gap-4">
-                {Array.from({ length: Math.ceil(roundMatches.length / 2) }).map((_, i) => (
-                  <div key={i} className="flex flex-col justify-around" style={{ height: `${2 * 70 + 16}px` }}>
-                    <Connector colorClass={lineColor} />
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )
-      })}
+          )
+        })}
+      </div>
+      <Legend
+        items={[
+          { term: "Rounds", label: "color-coded chips — connectors match round colors" },
+          ...(hasNeedsScore ? [{ term: "Needs score", label: "both players are in — tap to start scoring" }] : []),
+          ...(hasFeeders ? [{ term: "Winner of X × Y", label: "slot fills in when the earlier match finishes" }] : []),
+          ...(hasBye ? [{ term: "(bye)", label: "empty slot — the other player advances" }] : []),
+        ]}
+      />
     </div>
   )
 }

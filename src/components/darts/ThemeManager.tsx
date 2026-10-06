@@ -17,7 +17,7 @@ export function ThemeManager() {
       document.documentElement.style.setProperty("color-scheme", dark ? "dark" : "light")
       document
         .querySelector('meta[name="theme-color"]')
-        ?.setAttribute("content", dark ? "#0f172a" : "#ffffff")
+        ?.setAttribute("content", dark ? "#1a2030" : "#faf8f3")
     }
 
     apply()

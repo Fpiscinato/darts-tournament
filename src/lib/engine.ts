@@ -577,6 +577,68 @@ export async function undoLastConfirmedResult(tournamentId: string): Promise<Und
   return { ok: true }
 }
 
+/** Reopens one specific confirmed match so its result can be corrected
+ * (used by the pencil button next to finished matches). Mirrors
+ * undoLastConfirmedResult's safety checks: a later stage that has already
+ * started — or a next match that was already confirmed — blocks the edit
+ * with a plain-English reason. */
+export async function reopenMatch(tournamentId: string, matchId: string): Promise<UndoResult> {
+  const tournament = await db.tournaments.get(tournamentId)
+  if (!tournament) return { ok: false, reason: "Tournament not found" }
+  if (tournament.status === "completed") {
+    return { ok: false, reason: "Cannot edit: this tournament is finished. Reopen it first." }
+  }
+
+  const match = await db.matches.get(matchId)
+  if (!match || match.tournamentId !== tournamentId) return { ok: false, reason: "Match not found" }
+  if (match.status !== "completed") return { ok: false, reason: "Match is not confirmed yet" }
+  if (!match.player1Id || !match.player2Id) return { ok: false, reason: "This is a bye — nothing to edit" }
+  if (match.confirmedAt === null) {
+    return { ok: false, reason: "Cannot edit a walkover — revert it from the roster (Players → Rejoin)." }
+  }
+
+  if (match.nextMatchId) {
+    const next = await db.matches.get(match.nextMatchId)
+    if (next && next.status === "completed") {
+      return { ok: false, reason: "Cannot edit: the next match already has a confirmed result. Edit that one first." }
+    }
+  }
+
+  const blocking = await firstStartedLaterMatch(tournamentId, match.stage)
+  if (blocking) {
+    return {
+      ok: false,
+      reason: `Cannot edit: the ${STAGE_NAME[blocking.stage]} stage was built from this table and has already started. Reset those results first.`,
+    }
+  }
+
+  const timestamp = nowISO()
+  await db.transaction("rw", db.matches, async () => {
+    // Score goes back to 0–0 so the scoring screen opens clean instead of
+    // "decided" with the old, wrong score.
+    await db.matches.update(match.id, {
+      status: "pending",
+      player1Legs: 0,
+      player2Legs: 0,
+      winnerId: null,
+      confirmedAt: null,
+      walkover: false,
+      updatedAt: timestamp,
+    })
+    if (match.nextMatchId && match.nextMatchSlot) {
+      await db.matches.update(match.nextMatchId, {
+        [match.nextMatchSlot === 1 ? "player1Id" : "player2Id"]: null,
+        updatedAt: timestamp,
+      })
+    }
+    if (!(await allMatchesInStageCompleted(tournamentId, match.stage))) {
+      await rollbackLaterStages(tournamentId, match.stage)
+    }
+  })
+
+  return { ok: true }
+}
+
 export function withdrawnPlayerIds(tournament: Tournament): string[] {
   return (tournament.withdrawals ?? []).map((w) => w.playerId)
 }

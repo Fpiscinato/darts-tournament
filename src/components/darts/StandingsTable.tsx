@@ -4,6 +4,7 @@ import { computeStandings } from "@/lib/roundRobin"
 import type { Match } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Legend } from "@/components/darts/Legend"
 
 export function StandingsTable({
   playerIds,
@@ -80,6 +81,19 @@ export function StandingsTable({
           </tbody>
         </table>
       </div>
+      <Legend
+        items={[
+          { term: "P", label: "played" },
+          { term: "W / L", label: "matches won / lost" },
+          { term: "Legs", label: "legs for – legs against" },
+          { term: "Diff", label: "leg difference (+ = better)" },
+          { term: "Pts", label: "points (2 per win)" },
+          ...(withdrawnIds && withdrawnIds.size > 0 ? [{ term: "WD", label: "withdrew from the tournament" }] : []),
+          ...(standings.some((row) => row.playoffRequired)
+            ? [{ term: "Play-off", label: "needs a play-off to decide position" }]
+            : []),
+        ]}
+      />
     </div>
   )
 }

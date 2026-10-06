@@ -9,7 +9,6 @@ import type { BestOf, DrawMethod, LeagueFinalsFormat, Tournament, TournamentType
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { PageSkeleton } from "@/components/darts/PageSkeleton"
 import {
@@ -176,20 +175,30 @@ export function NewTournamentPage() {
 
         <div className="flex flex-col gap-2">
           <Label id="tournament-type-label">Type</Label>
-          <Tabs
-            value={type}
-            onValueChange={(v) => setType(v as TournamentType)}
-            aria-labelledby="tournament-type-label"
-          >
-            <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="league" className="min-h-11">
-                League
-              </TabsTrigger>
-              <TabsTrigger value="knockout" className="min-h-11">
-                Knockout
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
+          <div role="radiogroup" aria-labelledby="tournament-type-label" className="grid grid-cols-2 gap-2">
+            {(
+              [
+                { value: "league", label: "League" },
+                { value: "knockout", label: "Knockout" },
+              ] as const
+            ).map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={type === option.value}
+                aria-pressed={type === option.value}
+                onClick={() => setType(option.value)}
+                className={`min-h-11 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
+                  type === option.value
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-border bg-card text-foreground hover:bg-muted"
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="flex flex-col gap-2">

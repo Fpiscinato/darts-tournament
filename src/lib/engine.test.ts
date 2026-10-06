@@ -7,6 +7,7 @@ import {
   finishTournament,
   reopenTournament,
   rejoinPlayer,
+  reopenMatch,
   startTournament,
   undoLastConfirmedResult,
   withdrawPlayer,
@@ -306,6 +307,83 @@ describe("undoLastConfirmedResult", () => {
     const t = await makeTournament({ type: "league", playerIds: players(2), finalsFormat: "league_winner" })
     const result = await undoLastConfirmedResult(t.id)
     expect(result.ok).toBe(false)
+  })
+})
+
+describe("reopenMatch", () => {
+  it("reopens exactly the targeted match, leaving the others confirmed", async () => {
+    const ids = players(3)
+    const t = await makeTournament({
+      type: "league",
+      playerIds: ids,
+      finalsFormat: "league_winner",
+      stageFormats: { league: 3 },
+    })
+    await startTournament(t.id)
+    const all = await db.matches.where({ tournamentId: t.id }).toArray()
+    const target = all[0]
+    const other = all[1]
+    await confirmMatch(target.id, 2, 0)
+    await confirmMatch(other.id, 2, 1)
+
+    const result = await reopenMatch(t.id, target.id)
+    expect(result.ok).toBe(true)
+
+    const reopened = await db.matches.get(target.id)
+    expect(reopened?.status).toBe("pending")
+    expect(reopened?.player1Legs).toBe(0)
+    expect(reopened?.player2Legs).toBe(0)
+    expect(reopened?.winnerId).toBeNull()
+
+    const untouched = await db.matches.get(other.id)
+    expect(untouched?.status).toBe("completed")
+    expect(untouched?.player1Legs).toBe(2)
+  })
+
+  it("refuses on a finished tournament until it is reopened, then works", async () => {
+    const ids = players(4)
+    const t = await makeTournament({
+      type: "knockout",
+      playerIds: ids,
+      drawMethod: "manual",
+      stageFormats: { knockout: 3 },
+    })
+    await startTournament(t.id, { orderedPlayerIds: ids })
+    const round1 = await db.matches.where({ tournamentId: t.id, round: 1 }).toArray()
+    for (const m of round1) await confirmMatch(m.id, 2, 0)
+    const final = await db.matches.where({ tournamentId: t.id, round: 2 }).first()
+    await confirmMatch(final!.id, 2, 1)
+    expect((await db.tournaments.get(t.id))?.status).toBe("completed")
+
+    const blocked = await reopenMatch(t.id, final!.id)
+    expect(blocked.ok).toBe(false)
+
+    await reopenTournament(t.id)
+    const done = await reopenMatch(t.id, final!.id)
+    expect(done.ok).toBe(true)
+    const reopened = await db.matches.get(final!.id)
+    expect(reopened?.status).toBe("pending")
+    expect(reopened?.player1Legs).toBe(0)
+  })
+
+  it("refuses to reopen a feeder match once its next match is confirmed", async () => {
+    const ids = players(4)
+    const t = await makeTournament({
+      type: "knockout",
+      playerIds: ids,
+      drawMethod: "manual",
+      stageFormats: { knockout: 3 },
+    })
+    await startTournament(t.id, { orderedPlayerIds: ids })
+    const round1 = await db.matches.where({ tournamentId: t.id, round: 1 }).toArray()
+    for (const m of round1) await confirmMatch(m.id, 2, 0)
+    const final = await db.matches.where({ tournamentId: t.id, round: 2 }).first()
+    await confirmMatch(final!.id, 2, 1)
+    await reopenTournament(t.id)
+
+    const blocked = await reopenMatch(t.id, round1[0].id)
+    expect(blocked.ok).toBe(false)
+    expect(blocked.reason).toMatch(/next match already has a confirmed result/i)
   })
 })
 

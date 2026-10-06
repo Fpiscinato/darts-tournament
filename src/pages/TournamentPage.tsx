@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom"
 import { useLiveQuery } from "dexie-react-hooks"
 import { Share2, Trash2, Users } from "lucide-react"
 import { db } from "@/lib/db"
-import { deleteTournament, reopenTournament, withdrawnPlayerIds } from "@/lib/engine"
+import { deleteTournament, reopenMatch, reopenTournament, withdrawnPlayerIds } from "@/lib/engine"
 import { useToast } from "@/context/ToastContext"
 import { MatchControl } from "@/components/darts/MatchControl"
 import { MatchList } from "@/components/darts/MatchList"
@@ -12,8 +12,10 @@ import { BracketView } from "@/components/darts/BracketView"
 import { RosterDialog } from "@/components/darts/RosterDialog"
 import { ShareDialog } from "@/components/darts/ShareDialog"
 import { PageSkeleton } from "@/components/darts/PageSkeleton"
+import { Legend } from "@/components/darts/Legend"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -42,6 +44,7 @@ export function TournamentPage() {
   const [rosterOpen, setRosterOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
   const [working, setWorking] = useState(false)
+  const [activeTab, setActiveTab] = useState<string | null>(null)
 
   const openMatch = (mId: string) => navigate(`/tournaments/${id}/matches/${mId}`)
   const closeMatch = () => {
@@ -101,11 +104,16 @@ export function TournamentPage() {
 
   // Deterministic "who plays who" preview: fixtures are generated up front, so
   // the next matches are simply the earliest pending ones, stage by stage.
+  // Bracket slots still waiting on "Winner of X × Y" are skipped (players unknown).
   const stagePriority = (stage: Stage) => naturalStages.indexOf(stage)
   const upcoming = [...matches]
-    .filter((m) => m.status !== "completed")
+    .filter((m) => m.status !== "completed" && m.player1Id && m.player2Id)
     .sort((a, b) => stagePriority(a.stage) - stagePriority(b.stage) || a.round - b.round)
     .slice(0, 4)
+
+  const defaultTab = orderedStages[0] ?? naturalStages[0]
+  const resolvedTab =
+    activeTab && naturalStages.includes(activeTab as Stage) ? (activeTab as Stage) : (defaultTab ?? "league")
 
   async function handleReopen() {
     if (working) return
@@ -134,6 +142,68 @@ export function TournamentPage() {
     } finally {
       setWorking(false)
     }
+  }
+
+  // Pencil on a finished match: reopen (possibly the whole tournament,
+  // which is already finished) then re-score that single match from 0–0.
+  async function handleEditMatch(mId: string) {
+    if (working) return
+    if (tournament.status === "completed") {
+      setWorking(true)
+      try {
+        await reopenTournament(tournament.id)
+        notify("Tournament reopened — you can now correct the result")
+      } catch (err) {
+        notify(err instanceof Error ? err.message : "Could not reopen the tournament", "destructive")
+        return
+      } finally {
+        setWorking(false)
+      }
+    }
+    const result = await reopenMatch(tournament.id, mId)
+    if (!result.ok) {
+      notify(result.reason ?? "Could not edit the match", "destructive")
+      return
+    }
+    openMatch(mId)
+  }
+
+  const stagePendingCount = (stage: Stage) =>
+    matches.filter((m) => m.stage === stage && m.status !== "completed").length
+
+  const renderStage = (stage: Stage) => {
+    const stageMatches = matches.filter((m) => m.stage === stage)
+    const stagePlayerIds = Array.from(
+      new Set(stageMatches.flatMap((m) => [m.player1Id, m.player2Id]).filter((x): x is string => x !== null)),
+    )
+    const isRoundRobin = stage === "league" || (stage === "top4" && tournament.finalsFormat === "top4_round_robin")
+    const isBracket = stage === "knockout"
+    const done = stageDone(stage)
+    const left = stagePendingCount(stage)
+
+    return (
+      <div className={done ? "opacity-80" : undefined}>
+        <div className="mb-2 flex items-center gap-2">
+          <h2 className="text-lg font-medium">{STAGE_LABEL[stage]}</h2>
+          {done ? (
+            <Badge variant="secondary">done</Badge>
+          ) : left > 0 ? (
+            <Badge>{left} pending</Badge>
+          ) : null}
+        </div>
+        {isRoundRobin && (
+          <StandingsTable playerIds={stagePlayerIds} matches={stageMatches} withdrawnIds={withdrawnSet} />
+        )}
+        {isBracket && (
+          <BracketView matches={stageMatches} onSelectMatch={openMatch} nameOf={(id) => (id ? nameOf(id) : "")} />
+        )}
+        {(isRoundRobin || stage === "final" || isBracket) && (
+          <div className="mt-3">
+            <MatchList matches={stageMatches} onSelect={openMatch} onEdit={handleEditMatch} />
+          </div>
+        )}
+      </div>
+    )
   }
 
   return (
@@ -188,7 +258,7 @@ export function TournamentPage() {
       </div>
 
       {tournament.status === "completed" && (
-        <section className="mb-8">
+        <section className="mb-6">
           <h2 className="mb-2 text-sm font-medium text-muted-foreground">Final results</h2>
           <div className="overflow-x-auto rounded-lg border border-border">
             <table className="w-full min-w-[360px] text-sm">
@@ -227,11 +297,18 @@ export function TournamentPage() {
               </tbody>
             </table>
           </div>
+          <Legend
+            className="mt-2"
+            items={[
+              { term: "🏆", label: "champion" },
+              ...(results.some((r) => r.withdrawn) ? [{ term: "WD", label: "withdrew mid-tournament" }] : []),
+            ]}
+          />
         </section>
       )}
 
       {tournament.status === "active" && upcoming.length > 0 && (
-        <section className="mb-8">
+        <section className="mb-6">
           <h2 className="mb-2 text-sm font-medium text-muted-foreground">Up next</h2>
           <ul className="grid gap-2 sm:grid-cols-2">
             {upcoming.map((m) => (
@@ -239,7 +316,7 @@ export function TournamentPage() {
                 <button
                   type="button"
                   onClick={() => openMatch(m.id)}
-                  className="flex w-full items-center justify-between gap-2 rounded-lg border border-border bg-card px-4 py-3 text-left transition-colors hover:border-foreground/20 hover:bg-muted/40"
+                  className="flex w-full items-center justify-between gap-2 rounded-lg border border-border bg-card px-4 py-3 text-left transition-colors hover:border-primary/40 hover:bg-muted/40"
                 >
                   <span className="font-medium">
                     {nameOf(m.player1Id ?? "")}
@@ -254,35 +331,36 @@ export function TournamentPage() {
         </section>
       )}
 
-      <div className="flex flex-col gap-8">
-        {orderedStages.map((stage) => {
-          const stageMatches = matches.filter((m) => m.stage === stage)
-          const stagePlayerIds = Array.from(
-            new Set(stageMatches.flatMap((m) => [m.player1Id, m.player2Id]).filter((x): x is string => x !== null)),
-          )
-          const isRoundRobin = stage === "league" || (stage === "top4" && tournament.finalsFormat === "top4_round_robin")
-          const isBracket = stage === "knockout"
-          const done = stageDone(stage)
-
-          return (
-            <section key={stage} className={done ? "opacity-70" : undefined}>
-              <h2 className="mb-2 text-lg font-medium">
+      {naturalStages.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+          No matches yet.
+        </p>
+      ) : naturalStages.length === 1 ? (
+        renderStage(naturalStages[0])
+      ) : (
+        <Tabs value={resolvedTab} onValueChange={setActiveTab}>
+          <TabsList
+            className="w-full justify-start gap-1 overflow-x-auto rounded-xl p-1"
+            style={{ height: "auto" }}
+          >
+            {orderedStages.map((stage) => (
+              <TabsTrigger key={stage} value={stage} className="min-h-11 shrink-0 px-3">
                 {STAGE_LABEL[stage]}
-                {done && <span className="ml-2 text-sm font-normal text-muted-foreground">· done</span>}
-              </h2>
-              {isRoundRobin && (
-                <StandingsTable playerIds={stagePlayerIds} matches={stageMatches} withdrawnIds={withdrawnSet} />
-              )}
-              {isBracket && <BracketView matches={stageMatches} onSelectMatch={openMatch} nameOf={(id) => (id ? nameOf(id) : "")} />}
-              {(isRoundRobin || stage === "final") && (
-                <div className="mt-3">
-                  <MatchList matches={stageMatches} onSelect={openMatch} />
-                </div>
-              )}
-            </section>
-          )
-        })}
-      </div>
+                {stagePendingCount(stage) > 0 && stage !== resolvedTab && (
+                  <span className="ml-1 rounded-full bg-destructive px-1.5 text-[10px] font-semibold text-white">
+                    {stagePendingCount(stage)}
+                  </span>
+                )}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          {orderedStages.map((stage) => (
+            <TabsContent key={stage} value={stage} className="pt-3">
+              {renderStage(stage)}
+            </TabsContent>
+          ))}
+        </Tabs>
+      )}
 
       <AlertDialog open={confirmReopen} onOpenChange={setConfirmReopen}>
         <AlertDialogContent>
@@ -290,7 +368,7 @@ export function TournamentPage() {
             <AlertDialogTitle>Reopen this tournament?</AlertDialogTitle>
             <AlertDialogDescription>
               This tournament is finished. Reopening it removes its entry from the history ranking until it is
-              finished again, and lets you undo confirmed results.
+              finished again, and lets you correct confirmed results.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
