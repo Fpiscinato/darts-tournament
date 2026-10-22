@@ -22,3 +22,50 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# ===== Segurança (padrão OpenCode) — não remover =====
+# Segredos, chaves de API e configuração local
+.env
+.env.*
+!.env.example
+*.env
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+opencode.json
+opencode.jsonc
+.opencode/
+.dev.vars
+.dev.vars.*
+secrets.json
+credentials.json
+
+# Chaves SSH / GPG
+id_rsa
+id_ed25519
+*.ppk
+*.asc
+
+# Logs e arquivos temporários do sistema
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
+*.local
+
+# Pastas de dependências e caches
+node_modules/
+__pycache__/
+.venv/
+venv/
+.wrangler/
+.vite/
+coverage/
+
+# Configurações locais de ferramentas (caminhos/permissões da máquina)
+.claude/settings.local.json
