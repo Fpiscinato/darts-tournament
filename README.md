@@ -24,10 +24,13 @@ Dexie.js + Vitest.
 - **Player withdrawals** mid-tournament: results already earned stay on the
   board, unfinished matches become walkovers, and the player can rejoin
   later (their matches are restored exactly as they were).
-- One-tap **WhatsApp share** of the final results for a finished tournament.
+- One-tap **share of the final ranking** — the app draws the standings to a
+  canvas and shares it as an image through the native share sheet (or
+  downloads it).
 - All-time player ranking across every finished tournament.
 - Light, dark and system appearance themes.
 - JSON backup export/import, and a full local reset.
+- An in-app **Help** page with a step-by-step guide for running a tournament.
 
 ## Architecture
 
@@ -42,9 +45,14 @@ src/lib/
   players.ts     player CRUD (duplicate-name guard, delete-or-archive)
   ranking.ts     all-time ranking sort cascade
   backup.ts      zod-validated export/import/reset
-  share.ts       WhatsApp share text (pt-BR) + clipboard helpers
-src/pages/       one page per route (players, new tournament, tournament, history, settings)
-src/components/darts/  MatchControl (scoring screen), BracketView, StandingsTable, MatchList
+  share.ts       clipboard helpers + legacy WhatsApp text share
+  shareRanking.ts  renders the ranking to a canvas for the image share
+  roundColors.ts   one colour per round + the legend
+src/pages/       one page per route (home, players, new tournament, tournament,
+                 history, help, settings, 404)
+src/components/darts/  MatchControl (scoring screen), BracketView, StandingsTable,
+                 MatchList, ShareDialog, Legend, RosterDialog, ThemeManager,
+                 NavBar, OfflineIndicator, DartHitEffect, PageSkeleton
 ```
 
 All tournament rules live in `src/lib/*` as pure functions with no React or
@@ -57,17 +65,40 @@ only files that touch Dexie) — see the `*.test.ts` files next to each module.
 npm install
 npm run dev     # http://localhost:5173
 npm run test    # vitest
+npm run lint    # oxlint
 npm run build   # production build to dist/, includes the service worker
 ```
 
 ## Deploying
 
 This is a static site — any static host works. The intended target is
-**Cloudflare Pages**:
+**Cloudflare Workers with Static Assets** (`wrangler.jsonc` in the repo root:
+worker `darts-tournament`, `assets.directory: ./dist`, SPA fallback via
+`assets.not_found_handling`).
 
-1. `npm run build`
-2. Deploy the `dist/` directory (Cloudflare Pages: connect the repo and set
-   build command `npm run build`, output directory `dist`).
+**Live site:** <https://darts-tournament.f-piscinato.workers.dev>
+
+### Automatic (recommended)
+
+Connect the repository to the Cloudflare account (Workers Builds) and every push
+to `main` publishes on its own:
+
+| Setting | Value |
+| --- | --- |
+| Build command | `npm run build` |
+| Deploy command | `npx wrangler deploy` |
+| Root directory | `/` |
+
+### Manual
+
+```bash
+npm run build
+npx wrangler deploy     # needs `npx wrangler login`
+```
+
+> `wrangler` is **not** a dependency of this project — `npx` downloads it on
+> demand the first time. If you prefer it pinned, `npm i -D wrangler` and use
+> `npx wrangler` from `node_modules`.
 
 No server-side configuration, environment variables, or database is
 required. A local fallback — serving `dist/` from any static file server, or
