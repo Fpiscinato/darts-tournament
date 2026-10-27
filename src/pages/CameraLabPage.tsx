@@ -1541,9 +1541,15 @@ export function CameraLabPage() {
               value={sensitivity}
               onChange={(event) => setSensitivity(Number(event.target.value))}
               className="w-full accent-sky-500"
+              aria-describedby="sensitivity-help"
             />
             <span className="w-8 tabular-nums">{sensitivity}</span>
           </label>
+          <p id="sensitivity-help" className="-mt-1 text-xs text-muted-foreground">
+            How different a pixel must be from the empty-board reference before it counts as a dart. 35 suits
+            most rooms. Raise it if phantom darts appear with nothing thrown; lower it if a real dart in a dark
+            segment is missed. After changing the light, take “Board is empty” again.
+          </p>
         </div>
       </details>
 
