@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest"
 import type { Point } from "./boardGeometry"
-import { applyHomography, invertHomography, solveHomography } from "./homography"
+import {
+  applyHomography,
+  composeHomography,
+  invertHomography,
+  scaleHomography,
+  solveHomography,
+} from "./homography"
 
 const TRUE_H = [1.2, 0.15, 400, -0.08, 1.35, 120, 0.00018, 0.00009, 1]
 
@@ -78,5 +84,42 @@ describe("invertHomography", () => {
       expect(back.x).toBeCloseTo(point.x, 6)
       expect(back.y).toBeCloseTo(point.y, 6)
     }
+  })
+})
+
+describe("composeHomography", () => {
+  it("applies the inner transform first and the outer one after", () => {
+    const inner: [number, number, number, number, number, number, number, number, number] = [
+      2, 0, 30, 0, 2, -40, 0, 0, 1,
+    ]
+    const outer: [number, number, number, number, number, number, number, number, number] = [
+      0, -1, 500, 1, 0, 120, 0, 0, 1,
+    ]
+    const composed = composeHomography(outer, inner)
+
+    for (const point of [
+      { x: 0, y: 0 },
+      { x: 100, y: 250 },
+      { x: -60, y: 90 },
+    ]) {
+      const expected = applyHomography(outer, applyHomography(inner, point))
+      const actual = applyHomography(composed, point)
+      expect(actual.x).toBeCloseTo(expected.x, 8)
+      expect(actual.y).toBeCloseTo(expected.y, 8)
+    }
+  })
+
+  it("keeps h[8] normalised to one", () => {
+    const scaled = composeHomography(scaleHomography(3), scaleHomography(0.5))
+    expect(scaled[8]).toBeCloseTo(1, 12)
+    expect(scaled[0]).toBeCloseTo(1.5, 12)
+  })
+})
+
+describe("scaleHomography", () => {
+  it("rescales pixel coordinates without moving the origin", () => {
+    const h = scaleHomography(0.5)
+    const point = applyHomography(h, { x: 100, y: 40 })
+    expect(point).toEqual({ x: 50, y: 20 })
   })
 })

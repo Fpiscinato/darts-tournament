@@ -28,13 +28,26 @@ import {
 } from "@/lib/darts/boardGeometry"
 import type { BoardScore, Point } from "@/lib/darts/boardGeometry"
 import { detectBoard, refineBoard } from "@/lib/darts/boardDetector"
-import { applyHomography, invertHomography, solveHomography } from "@/lib/darts/homography"
+import {
+  applyHomography,
+  composeHomography,
+  invertHomography,
+  scaleHomography,
+  solveHomography,
+} from "@/lib/darts/homography"
 import type { Homography } from "@/lib/darts/homography"
+import {
+  BOARD_SPACE_SIZE,
+  pixelToMm,
+  staticEdgeMask,
+  warpToBoardSpace,
+} from "@/lib/darts/boardSpace"
 import {
   changedRatio,
   connectedComponents,
   differenceMask,
   meanLuma,
+  mergeSegments,
   toGrayscale,
 } from "@/lib/darts/dartDetection"
 import {
@@ -73,22 +86,51 @@ const DETECT_WIDTH = 1280
 const RECORD_COOLDOWN_MS = 900
 /** Two detections whose tips are this close (mm) are the same dart. */
 const SAME_DART_MM = 14
+/** How often the board model is re-fitted, in ms. The phone sits on a mount and
+ * gets nudged; following it costs ~15 ms and removes the need to recalibrate. */
+const TRACK_INTERVAL_MS = 1000
+/** A detection only becomes a dart after being seen in this many consecutive
+ * frames: a darts is static, sensor noise and shadows are not. */
+const HITS_TO_RECORD = 3
+/** Largest share of board space that may change and still be a dart. One dart
+ * covers a few tenths of a percent and a whole visit a bit over one; a nudged
+ * phone covers several percent, which is what this separates. */
+const MAX_DART_RATIO = 0.02
+/** How long a dart may go unseen before its streak is forgotten, in ms. */
+const TRACK_MEMORY_MS = 400
+/** After the board model is re-fitted the warp is resampled, so a few frames
+ * can look like a change. Nothing is recorded for this long afterwards. */
+const TRACK_SETTLE_MS = 600
+/** Plausible major-axis length of a dart, in board millimetres. A steel dart is
+ * 120–180 mm; the view is slightly from the side, so allow a little either way.
+ * Shadows, wires and numbers fall below the lower bound. */
+const MIN_DART_MM = 90
+const MAX_DART_MM = 280
 const STORAGE_KEY = "darts.cameraLab.calibration.v1"
+const CAMERA_KEY = "darts.cameraLab.camera.v1"
 
 type Phase = "idle" | "starting" | "live" | "error"
 type Mode = "calibrating" | "rotation" | "live"
 
+/**
+ * One dart-shaped change, tracked across frames.
+ *
+ * Everything is in board millimetres, so a moving phone cannot change what
+ * "this dart" means: the geometry is re-warped every frame, not re-learned.
+ */
 interface DetectedDart {
-  a: Point
-  b: Point
-  scoreA: BoardScore
-  scoreB: BoardScore
-  /** Both tips in board millimetres, used for dedupe and the export. */
+  /** Both tips in board millimetres. */
   aMm: Point
   bMm: Point
+  scoreA: BoardScore
+  scoreB: BoardScore
   /** Major-axis length in millimetres, for filtering shadows and reflections. */
   lengthMm: number
-  age: number
+  /** Consecutive frames this dart has been seen in. */
+  hits: number
+  /** Already pushed to the session. */
+  recorded: boolean
+  lastSeen: number
 }
 
 interface Hud {
@@ -204,8 +246,11 @@ export function CameraLabPage() {
   const streamRef = useRef<MediaStream | null>(null)
   const rafRef = useRef<number | null>(null)
   const detectCanvasRef = useRef<HTMLCanvasElement | null>(null)
-  const backgroundRef = useRef<Uint8ClampedArray | null>(null)
-  const backgroundMeanRef = useRef(0)
+  /** Empty-board reference, stored in board space (never in video pixels). */
+  const referenceRef = useRef<Uint8ClampedArray | null>(null)
+  const referenceLumaRef = useRef(0)
+  /** Pixels around wires and numbers in the reference; never scored. */
+  const referenceEdgesRef = useRef<Uint8Array | null>(null)
   const staticOverlayRef = useRef<HTMLCanvasElement | null>(null)
   const lastProcessRef = useRef(0)
   const lastDurationRef = useRef(0)
@@ -221,6 +266,11 @@ export function CameraLabPage() {
     /** Which board ring the radius describes, in mm. */
     ringMm: number
   } | null>(null)
+  /** Accepted model in video pixels; the tracker re-fits it while the phone
+   * moves. `radius` is always the 170 mm ring. */
+  const modelRef = useRef<{ centre: Point; radius: number; ringMm: number } | null>(null)
+  const lastTrackAtRef = useRef(0)
+  const modelUpdatedAtRef = useRef(0)
   const dartsRef = useRef<DetectedDart[]>([])
   const knownDartsRef = useRef<KnownDart[]>([])
   const lastRecordAtRef = useRef(0)
@@ -243,6 +293,9 @@ export function CameraLabPage() {
   const [autoDetect, setAutoDetect] = useState(true)
   const [showModel, setShowModel] = useState(true)
   const [sensitivity, setSensitivity] = useState(35)
+  const [cameras, setCameras] = useState<{ id: string; label: string }[]>([])
+  const [cameraId, setCameraId] = useState("")
+  const cameraIdRef = useRef("")
   const [lastScore, setLastScore] = useState<{ score: BoardScore; at: Point } | null>(null)
   const [hud, setHud] = useState<Hud>({ fps: 0, ms: 0, mmPerPx: 0 })
   const sessionRef = useRef<SessionDart[]>(loadSession())
@@ -317,6 +370,16 @@ export function CameraLabPage() {
     homographyRef.current = h
     inverseRef.current = invertHomography(h)
     calibrationPxRef.current = pixels
+    // Keep a compact model for the tracker: the four points are all on the
+    // 170 mm ring, so their mean is the centre and their mean distance the
+    // double-ring radius.
+    const centre = {
+      x: pixels.reduce((sum, point) => sum + point.x, 0) / pixels.length,
+      y: pixels.reduce((sum, point) => sum + point.y, 0) / pixels.length,
+    }
+    const radius =
+      pixels.reduce((sum, point) => sum + distance(point, centre), 0) / pixels.length
+    modelRef.current = { centre, radius, ringMm: MANUAL_RING_MM }
     setCalibrationVersion((version) => version + 1)
     setError(null)
     return true
@@ -389,7 +452,7 @@ export function CameraLabPage() {
     streamRef.current = null
     if (videoRef.current) videoRef.current.srcObject = null
     dartsRef.current = []
-    backgroundRef.current = null
+    referenceRef.current = null
     pointersRef.current.clear()
     gestureRef.current = null
     viewportRef.current = { zoom: 1, center: { x: 0, y: 0 } }
@@ -398,33 +461,86 @@ export function CameraLabPage() {
     setPhase("idle")
   }, [])
 
+  /** Cameras the browser exposes. On phones the telephoto lens often shows up
+   * as its own device, which is the difference between a board that fills 20%
+   * of the frame and one that fills most of it. */
+  const listCameras = useCallback(async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      setCameras(
+        devices
+          .filter((device) => device.kind === "videoinput")
+          .map((device, index) => ({
+            id: device.deviceId,
+            label: device.label || `Camera ${index + 1}`,
+          })),
+      )
+    } catch {
+      // Enumeration is optional; the default camera still works.
+    }
+  }, [])
+
   const startCamera = useCallback(async () => {
     setError(null)
     setPhase("starting")
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+    const requested = cameraIdRef.current
+
+    const open = (deviceId: string) =>
+      navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
-          facingMode: { ideal: "environment" },
+          // A chosen device cannot be combined with facingMode, and asking for
+          // the highest resolution we can get is what makes a dart more than a
+          // handful of pixels.
+          ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: "environment" } }),
           width: { ideal: 1920 },
           height: { ideal: 1080 },
         },
       })
-      streamRef.current = stream
-      const video = videoRef.current
-      if (!video) return
-      video.srcObject = stream
-      await video.play()
-      setPhase("live")
+
+    let stream: MediaStream | null = null
+    let note: string | null = null
+    try {
+      stream = await open(requested)
     } catch (err) {
-      setPhase("error")
-      setError(
-        err instanceof Error
-          ? `${err.name}: ${err.message}`
-          : "Could not start the camera. The page must be served over HTTPS.",
-      )
+      // Some Android builds list logical lenses that cannot be opened on their
+      // own. Falling back is better than leaving the lab dead.
+      if (requested) {
+        cameraIdRef.current = ""
+        setCameraId("")
+        try {
+          localStorage.removeItem(CAMERA_KEY)
+        } catch {
+          // ignore
+        }
+        try {
+          stream = await open("")
+          note = "That camera could not be opened — using the default one."
+        } catch {
+          stream = null
+        }
+      }
+      if (!stream && !note) {
+        setPhase("error")
+        setError(
+          err instanceof Error
+            ? `${err.name}: ${err.message}`
+            : "Could not start the camera. The page must be served over HTTPS.",
+        )
+        return
+      }
     }
-  }, [])
+
+    if (!stream) return
+    streamRef.current = stream
+    const video = videoRef.current
+    if (!video) return
+    video.srcObject = stream
+    await video.play()
+    setPhase("live")
+    setError(note)
+    void listCameras()
+  }, [listCameras])
 
   // Restore a previous calibration once the video is running.
   useEffect(() => {
@@ -438,6 +554,20 @@ export function CameraLabPage() {
       // Ignore malformed storage.
     }
   }, [phase, calibrated, applyCalibration])
+
+  // Remember which lens was chosen. On a phone the telephoto camera is often
+  // the difference between a dart being four pixels wide and forty.
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(CAMERA_KEY)
+      if (stored) {
+        cameraIdRef.current = stored
+        setCameraId(stored)
+      }
+    } catch {
+      // Ignore storage failures (private mode).
+    }
+  }, [])
 
   const applyViewport = useCallback((next: Viewport, width: number, height: number) => {
     const clamped = clampViewport(next, width, height)
@@ -457,17 +587,35 @@ export function CameraLabPage() {
     [applyViewport],
   )
 
+  /** Empty-board reference. Captured in board space, so nudging the phone does
+   * not invalidate it: the warp follows the board model, not the camera. */
   const setBackground = useCallback(() => {
     const video = videoRef.current
     const detect = detectCanvasRef.current
+    const h = homographyRef.current
     if (!video || !detect || detect.width === 0) return
+    if (!h) {
+      setError("Calibrate the board before taking the empty-board reference.")
+      return
+    }
     const ctx = detect.getContext("2d", { willReadFrequently: true })
     if (!ctx) return
     ctx.drawImage(video, 0, 0, detect.width, detect.height)
     const image = ctx.getImageData(0, 0, detect.width, detect.height)
     const gray = toGrayscale(image.data, detect.width, detect.height)
-    backgroundRef.current = gray
-    backgroundMeanRef.current = meanLuma(gray)
+    const toFrame = inverseRef.current
+    if (!toFrame) return
+    const warped = warpToBoardSpace(
+      gray,
+      detect.width,
+      detect.height,
+      composeHomography(scaleHomography(detect.width / video.videoWidth), toFrame),
+    )
+    referenceRef.current = warped
+    referenceLumaRef.current = meanLuma(warped)
+    // Wires and numbers move by a pixel or two whenever the model is re-fitted.
+    // Ignoring those pixels stops a whole class of phantom darts.
+    referenceEdgesRef.current = staticEdgeMask(warped)
     // A new reference means an empty board: forget which darts were logged so
     // the next throw is never mistaken for one of them.
     knownDartsRef.current = []
@@ -475,6 +623,7 @@ export function CameraLabPage() {
     lastRecordAtRef.current = 0
     setLastScore(null)
     setReferenceSet(true)
+    setError(null)
   }, [])
 
   const resetCalibration = useCallback(() => {
@@ -495,12 +644,34 @@ export function CameraLabPage() {
     boardScaleRef.current = 1
     setReferenceSet(false)
     setLastScore(null)
+    referenceRef.current = null
+    referenceEdgesRef.current = null
+    modelRef.current = null
+    lastTrackAtRef.current = 0
     try {
       localStorage.removeItem(STORAGE_KEY)
     } catch {
       // ignore
     }
   }, [])
+
+  /** Switch camera: the model was fitted in the old stream's pixels, so the
+   * board has to be found again. */
+  const chooseCamera = useCallback(
+    (id: string) => {
+      cameraIdRef.current = id
+      setCameraId(id)
+      try {
+        localStorage.setItem(CAMERA_KEY, id)
+      } catch {
+        // ignore
+      }
+      stopCamera()
+      resetCalibration()
+      void startCamera()
+    },
+    [resetCalibration, startCamera, stopCamera],
+  )
 
   const startManual = useCallback(() => {
     calibrationPxRef.current = []
@@ -904,6 +1075,76 @@ export function CameraLabPage() {
       return buffer
     }
 
+    /**
+     * Re-fit the board model while the camera is live.
+     *
+     * A phone on a mount gets nudged, and one nudge used to invalidate the
+     * whole calibration. The four-wire fingerprint is cheap enough to run
+     * every second, so the model follows the board instead of the user having
+     * to redo it. The correction is a similarity in video pixels composed onto
+     * the existing homography, so the rotation the user calibrated survives.
+     */
+    const trackBoard = (gray: Uint8ClampedArray) => {
+      const model = modelRef.current
+      const current = homographyRef.current
+      if (!model || !current || video.videoWidth === 0) return
+      const k = detect.width / video.videoWidth
+      const found = refineBoard(
+        gray,
+        detect.width,
+        detect.height,
+        { center: { x: model.centre.x * k, y: model.centre.y * k }, radius: model.radius * k },
+        { spanFraction: 0.15, centres: 16, radii: 20, radiusScale: [0.85, 1.15] },
+      )
+      if (!found || !(found.radius > 4)) return
+
+      const centre = { x: found.center.x / k, y: found.center.y / k }
+      const radius = found.radius / k
+      const ratio = radius / model.radius
+      const shift = distance(centre, model.centre)
+      // A hand over the board or a half-visible board must not teleport it.
+      if (!(ratio > 0.86 && ratio < 1.16)) return
+      if (shift > model.radius * 0.45) return
+      // Sub-pixel noise is not worth a redraw, and every redraw briefly
+      // suspends recording (the warp is resampled), so keep this generous.
+      if (Math.abs(ratio - 1) < 0.006 && shift < 3) return
+
+      const correction: Homography = [
+        ratio,
+        0,
+        centre.x - ratio * model.centre.x,
+        0,
+        ratio,
+        centre.y - ratio * model.centre.y,
+        0,
+        0,
+        1,
+      ]
+      // The correction maps old video pixels onto new ones, so it is the
+      // millimetres -> pixels direction (the inverse model) that it extends:
+      // inverse = correction ∘ oldInverse. Composing it onto the pixels ->
+      // millimetres model instead would apply a pixel translation to
+      // millimetres, which is what spawned phantom darts at every nudge.
+      const toFrame = inverseRef.current
+      if (!toFrame) return
+      const updatedInverse = composeHomography(correction, toFrame)
+      const updated = invertHomography(updatedInverse)
+      if (!updated) return
+
+      homographyRef.current = updated
+      inverseRef.current = updatedInverse
+      calibrationPxRef.current = calibrationPxRef.current.map((point) => ({
+        x: centre.x + ratio * (point.x - model.centre.x),
+        y: centre.y + ratio * (point.y - model.centre.y),
+      }))
+      modelRef.current = { centre, radius, ringMm: model.ringMm }
+      // The board moved: the pixels that moved with it are not darts, and a
+      // streak collected before the correction must not count towards one.
+      modelUpdatedAtRef.current = performance.now()
+      dartsRef.current = []
+      setCalibrationVersion((version) => version + 1)
+    }
+
     const detectDarts = (now: number) => {
       if (now - lastProcessRef.current < 80) return
       lastProcessRef.current = now
@@ -913,49 +1154,100 @@ export function CameraLabPage() {
       const image = detectCtx.getImageData(0, 0, detect.width, detect.height)
       const gray = toGrayscale(image.data, detect.width, detect.height)
 
-      const background = backgroundRef.current
       const h = homographyRef.current
-      if (!background || !h || !autoRef.current) {
+      if (!h) {
         lastDurationRef.current = performance.now() - started
         return
       }
 
-      // Phones re-expose continuously; without this a small brightness shift
-      // flips large areas of the frame and looks like a hundred new darts.
-      // The reference is shifted to the current mean before comparing.
-      const bias = meanLuma(gray) - backgroundMeanRef.current
-      const mask = differenceMask(gray, background, sensitivityRef.current, bias)
-      const ratio = changedRatio(mask)
+      // Follow the board before comparing, so a nudged phone does not look
+      // like a changed board.
+      if (modeRef.current === "live" && now - lastTrackAtRef.current > TRACK_INTERVAL_MS) {
+        lastTrackAtRef.current = now
+        trackBoard(gray)
+      }
 
-      // A hand or an arm crossing the frame invalidates this frame, but the
-      // darts already logged stay logged: clearing them used to re-record
-      // every dart still in the board as soon as the arm moved out.
-      if (ratio > 0.08) {
+      const reference = referenceRef.current
+      if (!reference || !autoRef.current) {
         lastDurationRef.current = performance.now() - started
         return
       }
 
-      const scale = video.videoWidth / detect.width
-      const blobs = connectedComponents(mask, detect.width, detect.height, {
-        minArea: 40,
-        maxArea: 12_000,
+      // Warp into board space: comparing there removes the camera entirely,
+      // so the empty-board reference stays valid while the phone moves. The
+      // warp needs millimetres -> pixels, which is the inverse model.
+      const toFrame = inverseRef.current
+      if (!toFrame) {
+        lastDurationRef.current = performance.now() - started
+        return
+      }
+      const warped = warpToBoardSpace(
+        gray,
+        detect.width,
+        detect.height,
+        composeHomography(scaleHomography(detect.width / video.videoWidth), toFrame),
+      )
+
+      // Phones re-expose continuously; a global gain is enough to make the
+      // difference meaningful again.
+      const liveLuma = meanLuma(warped)
+      const gain =
+        referenceLumaRef.current > 1 && liveLuma > 1
+          ? Math.min(1.6, Math.max(0.63, referenceLumaRef.current / liveLuma))
+          : 1
+      const mask = differenceMask(warped, reference, sensitivityRef.current, {
+        gain,
+        ignore: referenceEdgesRef.current,
+      })
+
+      // A hand or an arm over the board invalidates this frame, but the darts
+      // already logged stay logged: clearing them used to re-record every dart
+      // still in the board as soon as the arm moved out.
+      const changed = changedRatio(mask)
+      // A hand crossing the frame.
+      if (changed > 0.12) {
+        lastDurationRef.current = performance.now() - started
+        return
+      }
+      // Too much changed to be a dart: the board moved (or something large is
+      // in front of it). Re-fit the model on the next frame instead of logging
+      // the whole displaced board as a dart — this was the "nudge ghost".
+      if (changed > MAX_DART_RATIO) {
+        dartsRef.current = []
+        lastTrackAtRef.current = 0
+        lastDurationRef.current = performance.now() - started
+        return
+      }
+
+      const blobs = connectedComponents(mask, BOARD_SPACE_SIZE, BOARD_SPACE_SIZE, {
+        minArea: 45,
+        maxArea: 6000,
+        // Wires cut a dart into short pieces, so the per-piece length has to
+        // stay low: the merged segment is what gets measured.
         minLength: 18,
       })
 
+      // Wires are ignored, so a dart that crosses one arrives as two or three
+      // fragments. Join the fragments before measuring, otherwise no piece is
+      // long enough to count as a dart.
+      const segments = mergeSegments(
+        blobs.map((blob) => ({
+          a: pixelToMm(blob.endpoints[0]),
+          b: pixelToMm(blob.endpoints[1]),
+        })),
+        { gap: 30, angleDeg: 22 },
+      )
+
+      const matched = new Set<DetectedDart>()
       const next: DetectedDart[] = []
-      for (const blob of blobs) {
-        const endpoints = blob.endpoints.map((endpoint) => ({
-          x: endpoint.x * scale,
-          y: endpoint.y * scale,
-        }))
-        const aMm = applyHomography(h, endpoints[0])
-        const bMm = applyHomography(h, endpoints[1])
+      for (const segment of segments) {
+        const aMm = segment.a
+        const bMm = segment.b
         const lengthMm = distance(aMm, bMm)
 
-        // A real dart is 120–180 mm long and cannot be longer than the board.
-        // That single test removes most shadows, reflections and edges of the
-        // surround, which were the bulk of the false detections.
-        if (!Number.isFinite(lengthMm) || lengthMm < 70 || lengthMm > 320) continue
+        // A steel dart is 120–180 mm; shadows, reflections and the edges of
+        // the surround are either much shorter or much longer.
+        if (!Number.isFinite(lengthMm) || lengthMm < MIN_DART_MM || lengthMm > MAX_DART_MM) continue
 
         const scores = [scoreAtPoint(aMm), scoreAtPoint(bMm)]
         // Both tips off the board means an arm, a chair or the wall.
@@ -963,30 +1255,46 @@ export function CameraLabPage() {
 
         const previous = dartsRef.current.find(
           (dart) =>
-            Math.hypot(dart.a.x - endpoints[0].x, dart.a.y - endpoints[0].y) < 24 * scale ||
-            Math.hypot(dart.b.x - endpoints[1].x, dart.b.y - endpoints[1].y) < 24 * scale,
+            Math.hypot(dart.aMm.x - aMm.x, dart.aMm.y - aMm.y) < SAME_DART_MM ||
+            Math.hypot(dart.aMm.x - bMm.x, dart.aMm.y - bMm.y) < SAME_DART_MM,
         )
+        if (previous) matched.add(previous)
 
         next.push({
-          a: endpoints[0],
-          b: endpoints[1],
-          scoreA: scores[0],
-          scoreB: scores[1],
           aMm,
           bMm,
+          scoreA: scores[0],
+          scoreB: scores[1],
           lengthMm,
-          age: (previous?.age ?? 0) + 1,
+          hits: (previous?.hits ?? 0) + 1,
+          recorded: previous?.recorded ?? false,
+          lastSeen: now,
         })
       }
 
-      // At most one new dart per frame, after a cooldown, and never the same
-      // dart twice: three frames of stability only prove it is still there.
+      // Keep recently seen darts so a one-frame miss does not restart the
+      // stability count.
+      for (const dart of dartsRef.current) {
+        if (matched.has(dart)) continue
+        if (now - dart.lastSeen > TRACK_MEMORY_MS) continue
+        next.push(dart)
+      }
+
+      // A dart is static and sensor noise is not, so a detection only becomes
+      // a dart after being seen in HITS_TO_RECORD consecutive frames. This is
+      // what stopped a single noisy frame from filling the session.
       let recorded = false
       for (const dart of next) {
-        if (recorded || dart.age !== 3) continue
+        if (recorded || dart.recorded || dart.hits < HITS_TO_RECORD) continue
         if (now - lastRecordAtRef.current < RECORD_COOLDOWN_MS) continue
-        if (knownDartsRef.current.some((known) => isSameDart(dart.aMm, dart.bMm, known))) continue
+        // Just after the model moved, the resampled warp can look like a dart.
+        if (now - modelUpdatedAtRef.current < TRACK_SETTLE_MS) continue
+        if (knownDartsRef.current.some((known) => isSameDart(dart.aMm, dart.bMm, known))) {
+          dart.recorded = true
+          continue
+        }
 
+        dart.recorded = true
         knownDartsRef.current.push({ aMm: dart.aMm, bMm: dart.bMm })
         lastRecordAtRef.current = now
         recorded = true
@@ -1079,11 +1387,14 @@ export function CameraLabPage() {
       }
 
       const darts = dartsRef.current
-      if (darts.length > 0) {
+      const model = homographyRef.current
+      if (darts.length > 0 && model) {
         ctx.lineWidth = Math.max(2, canvas.width / 400)
         for (const dart of darts) {
-          const a = toScreen(dart.a)
-          const b = toScreen(dart.b)
+          // Darts live in board millimetres; project them back through the
+          // current model so they stay on the board even if the phone moved.
+          const a = toScreen(applyHomography(model, dart.aMm))
+          const b = toScreen(applyHomography(model, dart.bMm))
           ctx.strokeStyle = "rgba(250, 204, 21, 0.9)"
           ctx.beginPath()
           ctx.moveTo(a.x, a.y)
@@ -1167,7 +1478,7 @@ export function CameraLabPage() {
         ctx.stroke()
       }
 
-      if (modeRef.current === "live" && backgroundRef.current) detectDarts(now)
+      if (modeRef.current === "live" && referenceRef.current) detectDarts(now)
 
       frameTimesRef.current.push(now)
       if (now - hudAt > 500) {
@@ -1394,8 +1705,9 @@ export function CameraLabPage() {
 
       {boardSizePercent !== null && boardSizePercent < 35 && (
         <p className="text-sm text-amber-500">
-          The board fills only {boardSizePercent}% of the frame. Move the phone (or zoom) so it fills most of the
-          picture: at this size the ring lines are approximate and a dart can be off by a whole segment.
+          The board fills only {boardSizePercent}% of the frame. Below about 35% a dart is a couple of pixels
+          wide, so automatic scoring will miss it and the ring lines are approximate. Move the phone closer
+          (about 1 m), or pick the telephoto lens under Detection settings — digital zoom cannot add detail.
         </p>
       )}
 
@@ -1550,6 +1862,27 @@ export function CameraLabPage() {
             most rooms. Raise it if phantom darts appear with nothing thrown; lower it if a real dart in a dark
             segment is missed. After changing the light, take “Board is empty” again.
           </p>
+          {cameras.length > 1 && (
+            <label className="flex flex-col gap-1">
+              <span className="whitespace-nowrap">Camera</span>
+              <select
+                value={cameraId}
+                onChange={(event) => chooseCamera(event.target.value)}
+                className="h-10 rounded-md border border-input bg-background px-2 text-sm"
+              >
+                <option value="">Default (rear)</option>
+                {cameras.map((device) => (
+                  <option key={device.id} value={device.id}>
+                    {device.label}
+                  </option>
+                ))}
+              </select>
+              <span className="text-xs text-muted-foreground">
+                If the phone lists a telephoto lens (3×/5×), pick it: it puts several times more pixels on the
+                board than digital zoom can. Switching camera resets the calibration.
+              </span>
+            </label>
+          )}
         </div>
       </details>
 

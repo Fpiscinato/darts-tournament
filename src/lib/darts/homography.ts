@@ -58,8 +58,34 @@ export function applyHomography(h: readonly number[], point: Point): Point {
   }
 }
 
-/** Inverse transform for drawing board space back onto the video frame. */
-export function invertHomography(h: Homography): Homography | null {
+/** Uniform scale of frame pixels, e.g. video pixels to detection-canvas pixels. */
+export function scaleHomography(factor: number): Homography {
+  return [factor, 0, 0, 0, factor, 0, 0, 0, 1]
+}
+
+/**
+ * `outer ∘ inner`: the transform that applies `inner` first and `outer` after.
+ *
+ * Used to chain a small correction (the board moved or changed size between
+ * two detections) onto an existing board model without throwing away the
+ * rotation that the user calibrated by hand.
+ */
+export function composeHomography(outer: Homography, inner: Homography): Homography {
+  const out = new Array<number>(9).fill(0)
+  for (let row = 0; row < 3; row++) {
+    for (let column = 0; column < 3; column++) {
+      out[row * 3 + column] =
+        outer[row * 3] * inner[column] +
+        outer[row * 3 + 1] * inner[3 + column] +
+        outer[row * 3 + 2] * inner[6 + column]
+    }
+  }
+  const last = out[8]
+  if (Math.abs(last) < 1e-12) return [...inner] as Homography
+  return out.map((value) => value / last) as Homography
+}
+
+/** Inverse transform for drawing board space back onto the video frame. */export function invertHomography(h: Homography): Homography | null {
   const [a, b, c, d, e, f, g, i, j] = h
 
   const A = e * j - f * i

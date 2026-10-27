@@ -27,21 +27,35 @@ export function meanLuma(gray: Uint8ClampedArray): number {
   return count === 0 ? 0 : sum / count
 }
 
+export interface DifferenceOptions {
+  /** Multiplies `a` before comparing, undoing a global exposure change. */
+  gain?: number
+  /** Added to `b` before comparing, undoing a global brightness offset. */
+  bias?: number
+  /** Pixel indices to ignore (static edges, the frame border, ...). */
+  ignore?: Uint8Array | null
+}
+
 /** 1 where the absolute difference exceeds `threshold`, 0 elsewhere.
  *
- * `bias` is added to `b` before comparing: a phone camera continuously
- * re-exposes, and without this a small brightness shift flips large areas of
- * the frame and looks exactly like a hundred new darts.
+ * A phone camera re-exposes continuously. `gain` (multiplicative) and `bias`
+ * (additive) are applied to the live frame before the comparison, so a
+ * brightness shift does not flip large areas of the frame and look like a
+ * hundred new darts.
  */
 export function differenceMask(
   a: Uint8ClampedArray,
   b: Uint8ClampedArray,
   threshold: number,
-  bias = 0,
+  options: DifferenceOptions = {},
 ): Uint8Array {
+  const gain = options.gain ?? 1
+  const bias = options.bias ?? 0
+  const ignore = options.ignore
   const mask = new Uint8Array(a.length)
   for (let i = 0; i < a.length; i++) {
-    mask[i] = Math.abs(a[i] - (b[i] + bias)) >= threshold ? 1 : 0
+    if (ignore && ignore[i]) continue
+    mask[i] = Math.abs(a[i] * gain - (b[i] + bias)) >= threshold ? 1 : 0
   }
   return mask
 }
@@ -234,4 +248,101 @@ function describeBlob(pixels: number[], width: number): Blob {
     endpoints: [minPoint, maxPoint],
     length: maxProjection - minProjection,
   }
+}
+
+export interface Segment {
+  a: Point
+  b: Point
+}
+
+export interface MergeOptions {
+  /** Largest gap between two fragments of the same dart, in mm. */
+  gap?: number
+  /** How far the connecting line may bend, in degrees. */
+  angleDeg?: number
+}
+
+/**
+ * Join fragments of one dart that a wire or a dark patch cut in two.
+ *
+ * The detection mask deliberately ignores the wires and the ring boundaries,
+ * which is what killed the false positives, but it also slices any dart that
+ * crosses them. One physical dart then arrives as two or three short segments
+ * and none of them is long enough to be a dart. Two segments are the same dart
+ * when the gap between them is short *and* the gap points along them: parallel
+ * darts in neighbouring beds are close together but their gap is across them.
+ */
+export function mergeSegments(segments: Segment[], options: MergeOptions = {}): Segment[] {
+  const gap = options.gap ?? 25
+  const maxAngle = ((options.angleDeg ?? 22) * Math.PI) / 180
+  const minDot = Math.cos(maxAngle)
+
+  let current = segments
+    .filter((segment) => Math.hypot(segment.b.x - segment.a.x, segment.b.y - segment.a.y) > 1)
+    .map((segment) => ({ ...segment }))
+
+  let merged = true
+  while (merged) {
+    merged = false
+    outer: for (let i = 0; i < current.length; i++) {
+      for (let j = i + 1; j < current.length; j++) {
+        const joined = joinSegments(current[i], current[j], gap, minDot)
+        if (!joined) continue
+        current = current.filter((_, index) => index !== i && index !== j)
+        current.push(joined)
+        merged = true
+        break outer
+      }
+    }
+  }
+
+  return current
+}
+
+/** Union of two collinear-ish segments, or null when they are not one dart. */
+function joinSegments(first: Segment, second: Segment, gap: number, minDot: number): Segment | null {
+  const length = (segment: Segment) => Math.hypot(segment.b.x - segment.a.x, segment.b.y - segment.a.y)
+  const unit = (from: Point, to: Point): Point => {
+    const distance = Math.hypot(to.x - from.x, to.y - from.y)
+    return distance < 1e-9 ? { x: 0, y: 0 } : { x: (to.x - from.x) / distance, y: (to.y - from.y) / distance }
+  }
+
+  const firstUnit = unit(first.a, first.b)
+  const secondUnit = unit(second.a, second.b)
+  // They must point the same way, so the merged ends are the far ones.
+  if (Math.abs(firstUnit.x * secondUnit.x + firstUnit.y * secondUnit.y) < minDot) return null
+
+  // Closest pair of ends, then check that the gap runs along the dart.
+  const pairs: [Point, Point][] = [
+    [first.b, second.a],
+    [first.b, second.b],
+    [first.a, second.a],
+    [first.a, second.b],
+  ]
+  let best: { from: Point; to: Point; distance: number } | null = null
+  for (const [from, to] of pairs) {
+    const distance = Math.hypot(to.x - from.x, to.y - from.y)
+    if (!best || distance < best.distance) best = { from, to, distance }
+  }
+  if (!best) return null
+  const allowed = Math.max(gap, 0.35 * Math.max(length(first), length(second)))
+  if (best.distance > allowed) return null
+  const gapUnit = unit(best.from, best.to)
+  const along = Math.abs(gapUnit.x * firstUnit.x + gapUnit.y * firstUnit.y)
+  if (along < minDot) return null
+
+  // Keep the two ends that are farthest apart.
+  const ends = [first.a, first.b, second.a, second.b]
+  let far: [Point, Point] = [ends[0], ends[1]]
+  let farDistance = 0
+  for (let i = 0; i < ends.length; i++) {
+    for (let j = i + 1; j < ends.length; j++) {
+      const distance = Math.hypot(ends[j].x - ends[i].x, ends[j].y - ends[i].y)
+      if (distance > farDistance) {
+        farDistance = distance
+        far = [ends[i], ends[j]]
+      }
+    }
+  }
+  return { a: far[0], b: far[1] }
 }

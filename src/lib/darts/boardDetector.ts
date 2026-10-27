@@ -443,6 +443,17 @@ export interface BoardSeed {
   radius: number
 }
 
+export interface RefineOptions {
+  /** Half-width of the centre search, as a fraction of the seed radius. */
+  spanFraction?: number
+  /** Coarse grid points per axis. */
+  centres?: number
+  /** Coarse radius samples across the search band. */
+  radii?: number
+  /** Radius search band, as a multiple of the seed radius. */
+  radiusScale?: [number, number]
+}
+
 /**
  * Turn a rough guess into the board's real centre and double-ring radius.
  *
@@ -459,21 +470,28 @@ export function refineBoard(
   width: number,
   height: number,
   seed: BoardSeed,
+  options: RefineOptions = {},
 ): DetectedBoard | null {
   if (!(seed.radius > 4)) return null
   const shorter = Math.min(width, height)
 
   // The seed may be the double ring, the rim or the surround; search a band
-  // that contains all three readings of it.
-  const minRadius = Math.max(10, seed.radius * 0.5)
-  const maxRadius = Math.min(shorter * 0.62, seed.radius * 1.3)
+  // that contains all three readings of it. Tracking passes a tight band
+  // because the board only moved a little since the last time.
+  const [minScale, maxScale] = options.radiusScale ?? [0.5, 1.3]
+  const minRadius = Math.max(10, seed.radius * minScale)
+  const maxRadius = Math.min(shorter * 0.62, seed.radius * maxScale)
   if (maxRadius <= minRadius) return null
+
+  const spanFraction = options.spanFraction ?? 0.32
+  const centres = options.centres ?? 32
+  const radii = options.radii ?? 48
 
   // A fixed budget for the coarse pass: 33 × 33 centres × ~48 radii. The hill
   // climb afterwards covers any distance the coarser grid skipped.
-  const span = Math.max(24, seed.radius * 0.32)
-  const step = Math.max(2, (span * 2) / 32)
-  const radiusStep = Math.max(1.5, (maxRadius - minRadius) / 48)
+  const span = Math.max(24, seed.radius * spanFraction)
+  const step = Math.max(2, (span * 2) / centres)
+  const radiusStep = Math.max(1.5, (maxRadius - minRadius) / radii)
 
   // Only the band around the board can be sampled, so the gradient field is
   // built for that box alone: on a 1080p frame that is ~10× less work than the

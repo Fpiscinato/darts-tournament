@@ -154,4 +154,42 @@ describe("refineBoard", () => {
     expect(refineBoard(blank, size, size, { center: { x: 120, y: 120 }, radius: 0 })).toBeNull()
     expect(refineBoard(blank, size, size, { center: { x: 120, y: 120 }, radius: 60 })).toBeNull()
   })
+
+  it("follows a small move with the tight tracking band", () => {
+    // What the once-a-second tracker does: the phone was nudged, so the seed is
+    // the previous model and only a narrow band is searched.
+    const size = 720
+    const pxPerMm = 1.5
+    const cx = 372
+    const cy = 352
+    const gray = boardImage(size, cx, cy, pxPerMm)
+
+    const refined = refineBoard(
+      gray,
+      size,
+      size,
+      { center: { x: 360, y: 360 }, radius: 170 * pxPerMm },
+      { spanFraction: 0.15, centres: 16, radii: 20, radiusScale: [0.85, 1.15] },
+    )
+
+    expect(refined).not.toBeNull()
+    // The tight band is a coarse grid plus a hill climb; a couple of pixels is
+    // about a millimetre on a real phone, well under the double-wire width.
+    expect(Math.abs((refined?.center.x ?? 0) - cx)).toBeLessThan(4)
+    expect(Math.abs((refined?.center.y ?? 0) - cy)).toBeLessThan(4)
+    expect(refined?.radius).toBeCloseTo(170 * pxPerMm, 0)
+  })
+
+  it("does not invent a board when the tracking band has nothing to lock onto", () => {
+    const size = 480
+    const blank = new Uint8ClampedArray(size * size).fill(120)
+    const refined = refineBoard(
+      blank,
+      size,
+      size,
+      { center: { x: 240, y: 240 }, radius: 120 },
+      { spanFraction: 0.15, centres: 12, radii: 14, radiusScale: [0.85, 1.15] },
+    )
+    expect(refined).toBeNull()
+  })
 })

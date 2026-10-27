@@ -3,6 +3,7 @@ import {
   changedRatio,
   connectedComponents,
   differenceMask,
+  mergeSegments,
   toGrayscale,
 } from "./dartDetection"
 
@@ -91,5 +92,41 @@ describe("connectedComponents", () => {
     for (let y = 5; y < 8; y++) for (let x = 5; x < 8; x++) mask[y * width + x] = 1
 
     expect(connectedComponents(mask, width, height, { minArea: 1, minLength: 10 })).toHaveLength(0)
+  })
+})
+
+describe("mergeSegments", () => {
+  it("joins two collinear fragments cut by a wire", () => {
+    const merged = mergeSegments([
+      { a: { x: 0, y: 0 }, b: { x: 0, y: -44 } },
+      { a: { x: 0, y: -58 }, b: { x: 0, y: -130 } },
+    ])
+    expect(merged).toHaveLength(1)
+    const ends = [merged[0].a.y, merged[0].b.y].sort((a, b) => a - b)
+    expect(ends[0]).toBe(-130)
+    expect(ends[1]).toBe(0)
+  })
+
+  it("leaves two parallel darts in neighbouring beds apart", () => {
+    const merged = mergeSegments([
+      { a: { x: -10, y: 0 }, b: { x: -10, y: -140 } },
+      { a: { x: 10, y: 0 }, b: { x: 10, y: -140 } },
+    ])
+    expect(merged).toHaveLength(2)
+  })
+
+  it("keeps fragments that are far apart or badly aligned separate", () => {
+    expect(
+      mergeSegments([
+        { a: { x: 0, y: 0 }, b: { x: 0, y: -40 } },
+        { a: { x: 0, y: -120 }, b: { x: 0, y: -200 } },
+      ]),
+    ).toHaveLength(2)
+    expect(
+      mergeSegments([
+        { a: { x: 0, y: 0 }, b: { x: 0, y: -100 } },
+        { a: { x: 8, y: -100 }, b: { x: 100, y: -108 } },
+      ]),
+    ).toHaveLength(2)
   })
 })
