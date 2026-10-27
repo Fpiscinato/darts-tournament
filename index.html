@@ -13,6 +13,73 @@
         if (!m || m.matches) document.documentElement.classList.add('dark')
       } catch (e) {}
     </script>
+    <style>
+      /* The boot screen must not depend on the app bundle or on Tailwind: it is
+         the last thing still visible when either of them fails to load. */
+      html {
+        background: #ffffff;
+      }
+      html.dark {
+        background: #0f172a;
+      }
+      #boot {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        box-sizing: border-box;
+        margin: 0;
+        padding: 24px;
+        background: #ffffff;
+        color: #0f172a;
+        font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        text-align: center;
+      }
+      html.dark #boot {
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      #boot-title {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      #boot-detail {
+        margin: 0;
+        max-width: 22rem;
+        font-size: 13px;
+        line-height: 1.45;
+        color: #475569;
+        overflow-wrap: anywhere;
+      }
+      html.dark #boot-detail {
+        color: #94a3b8;
+      }
+      #boot-reload {
+        display: none;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        padding: 0 18px;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        background: #f1f5f9;
+        color: #0f172a;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      html.dark #boot-reload {
+        border-color: #334155;
+        background: #1e293b;
+        color: #e2e8f0;
+      }
+    </style>
     <meta name="description" content="Live darts tournament scoring, brackets and standings." />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -21,6 +88,78 @@
     <title>Darts Tournament</title>
   </head>
   <body>
+    <div id="boot" role="status" aria-live="polite">
+      <p id="boot-title">Loading…</p>
+      <p id="boot-detail">Starting the app.</p>
+      <button id="boot-reload" type="button" onclick="window.location.reload()">Reload</button>
+    </div>
+    <script>
+      // Lives outside the React bundle on purpose: if the cached index.html
+      // points at a bundle that no longer exists, this is the only code that
+      // still runs. It turns a silent black screen into a visible message, and
+      // after one failed start it reloads itself once to pick up the new build.
+      ;(function () {
+        var RETRY_KEY = 'darts.boot.retried'
+        var boot = document.getElementById('boot')
+        if (!boot) return
+
+        var title = document.getElementById('boot-title')
+        var detail = document.getElementById('boot-detail')
+        var reload = document.getElementById('boot-reload')
+        var failed = false
+
+        function show(message, isFailure) {
+          if (!document.getElementById('boot')) return
+          if (isFailure) failed = true
+          if (title) title.textContent = failed ? 'The app failed to start' : 'Loading…'
+          if (detail) detail.textContent = message
+          if (reload) reload.style.display = 'inline-flex'
+        }
+
+        function describe(event) {
+          if (event.message) return String(event.message)
+          var target = event.target
+          if (target && (target.tagName === 'SCRIPT' || target.tagName === 'LINK')) {
+            return 'Could not load ' + (target.src || target.href)
+          }
+          return ''
+        }
+
+        // A missing asset or a syntax error before React mounts.
+        window.addEventListener(
+          'error',
+          function (event) {
+            var message = describe(event || {})
+            if (message) show(message, true)
+          },
+          true,
+        )
+        window.addEventListener('unhandledrejection', function (event) {
+          var reason = event && event.reason
+          show(reason && reason.message ? String(reason.message) : String(reason || 'Unknown error'), true)
+        })
+
+        // Slow start: say so, and offer the manual way out. A real error is
+        // never replaced by this message.
+        window.setTimeout(function () {
+          if (failed || !document.getElementById('boot')) return
+          show('Still loading. If this does not change, reload the app.', false)
+        }, 8000)
+
+        // Broken start: one automatic retry. The flag stops a reload loop when
+        // the problem is not going to fix itself.
+        window.setTimeout(function () {
+          if (!document.getElementById('boot')) return
+          try {
+            if (sessionStorage.getItem(RETRY_KEY)) return
+            sessionStorage.setItem(RETRY_KEY, '1')
+          } catch (e) {
+            return
+          }
+          window.location.reload()
+        }, 15000)
+      })()
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

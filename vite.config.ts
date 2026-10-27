@@ -42,6 +42,12 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest}'],
         navigateFallback: '/index.html',
+        // Deploys replace every hashed asset, so an old index.html paired with
+        // old assets is the classic black-screen: take control immediately and
+        // drop the superseded precache instead of leaving mixed revisions.
+        skipWaiting: true,
+        clientsClaim: true,
+        cleanupOutdatedCaches: true,
       },
     }),
   ],
