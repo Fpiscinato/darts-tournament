@@ -1,4 +1,6 @@
 import { useRef, useState } from "react"
+import { Link } from "react-router-dom"
+import { ScanLine } from "lucide-react"
 import { useLiveQuery } from "dexie-react-hooks"
 import { BackupError, exportBackup, fullReset, parseBackupFile, replaceAllWithBackup, type BackupFile } from "@/lib/backup"
 import { db } from "@/lib/db"
@@ -128,6 +130,19 @@ export function SettingsPage() {
         <input ref={fileInputRef} type="file" accept="application/json" className="hidden" onChange={handleFileChosen} />
         <p className="text-xs text-muted-foreground">
           Everything lives on this device. Export a backup regularly, especially after finishing a tournament.
+        </p>
+      </section>
+
+      <section className="mb-8 flex flex-col gap-3">
+        <h2 className="text-sm font-medium text-muted-foreground">Experimental</h2>
+        <Button asChild className="min-h-11 justify-start" variant="outline">
+          <Link to="/camera-lab">
+            <ScanLine /> Camera Lab
+          </Link>
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          Point the phone camera at the board and let it read the darts for you. Early prototype: it speaks each
+          score, logs every dart, and never touches tournament data.
         </p>
       </section>
 

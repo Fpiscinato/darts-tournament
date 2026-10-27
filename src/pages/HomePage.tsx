@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom"
 import { useLiveQuery } from "dexie-react-hooks"
-import { Plus } from "lucide-react"
+import { Plus, ScanLine } from "lucide-react"
 import { db } from "@/lib/db"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -26,13 +26,22 @@ export function HomePage() {
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-6">
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-semibold">Tournaments</h1>
-        <Button asChild className="min-h-11">
-          <Link to="/tournaments/new">
-            <Plus /> New Tournament
-          </Link>
-        </Button>
+        <div className="ml-auto flex items-center gap-2">
+          <Button asChild variant="outline" className="min-h-11 px-3">
+            <Link to="/camera-lab" aria-label="Open Camera Lab">
+              <ScanLine />
+              <span className="hidden sm:inline">Camera</span>
+            </Link>
+          </Button>
+          <Button asChild className="min-h-11">
+            <Link to="/tournaments/new">
+              <Plus /> <span className="sm:hidden">New</span>
+              <span className="hidden sm:inline">New Tournament</span>
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {tournaments.length === 0 && (
