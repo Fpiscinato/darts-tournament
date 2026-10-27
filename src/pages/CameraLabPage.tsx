@@ -1,6 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
-import { ArrowLeft, Camera, CameraOff, Crosshair, Download, RefreshCw, Scan, ScanLine, Trash2 } from "lucide-react"
+import {
+  ArrowLeft,
+  Camera,
+  CameraOff,
+  Crosshair,
+  Download,
+  MousePointerClick,
+  RefreshCw,
+  Scan,
+  ScanLine,
+  Trash2,
+  Volume2,
+  VolumeX,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -21,6 +36,19 @@ import {
   differenceMask,
   toGrayscale,
 } from "@/lib/darts/dartDetection"
+import {
+  MAX_ZOOM,
+  MIN_ZOOM,
+  autoFrame,
+  clampZoom,
+  clampViewport,
+  clientToCanvas,
+  cropFor,
+  screenToVideo,
+  videoToScreen,
+  viewportAnchoredOn,
+} from "@/lib/darts/viewport"
+import type { Viewport } from "@/lib/darts/viewport"
 import { cn } from "@/lib/utils"
 
 /** Radius (mm) where a manual tap lands when the user taps the outer wire of
@@ -63,6 +91,8 @@ interface SessionDart {
 }
 
 const SESSION_KEY = "darts.cameraLab.session.v1"
+
+const STEPS = ["Camera", "Find board", "Set rotation", "Empty board", "Throw"] as const
 
 /** Turn a score label into something a speech engine reads naturally. */
 function scoreSpeech(label: string): string {
@@ -117,6 +147,16 @@ function drawPolygon(
   ctx.stroke()
 }
 
+interface Gesture {
+  kind: "pan" | "pinch"
+  startViewport: Viewport
+  startPoint: Point
+  startDistance: number
+  anchorVideo: Point
+  moved: boolean
+  startedAt: number
+}
+
 export function CameraLabPage() {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -135,16 +175,43 @@ export function CameraLabPage() {
   const pendingBoardRef = useRef<{ center: Point; radius: number; confidence: number } | null>(null)
   const dartsRef = useRef<DetectedDart[]>([])
   const lastScoreRef = useRef<{ score: BoardScore; at: Point } | null>(null)
+  const viewportRef = useRef<Viewport>({ zoom: 1, center: { x: 0, y: 0 } })
+  const pointersRef = useRef(new Map<number, Point>())
+  const gestureRef = useRef<Gesture | null>(null)
 
-  const pushRecord = useCallback((record: SessionDart) => {
-    sessionRef.current = [...sessionRef.current, record].slice(-500)
-    setSession(sessionRef.current)
-    saveSession(sessionRef.current)
-  }, [])
-
+  const [phase, setPhase] = useState<Phase>("idle")
+  const [mode, setMode] = useState<Mode>("calibrating")
+  const [manual, setManual] = useState(false)
+  const [referenceSet, setReferenceSet] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [calibrationVersion, setCalibrationVersion] = useState(0)
+  const [tapCount, setTapCount] = useState(0)
+  const [autoDetect, setAutoDetect] = useState(true)
+  const [showModel, setShowModel] = useState(true)
+  const [sensitivity, setSensitivity] = useState(35)
+  const [lastScore, setLastScore] = useState<{ score: BoardScore; at: Point } | null>(null)
+  const [hud, setHud] = useState<Hud>({ fps: 0, ms: 0, mmPerPx: 0 })
+  const sessionRef = useRef<SessionDart[]>(loadSession())
+  const [session, setSession] = useState<SessionDart[]>(sessionRef.current)
+  const [pendingConfidence, setPendingConfidence] = useState<number | null>(null)
   const [voice, setVoice] = useState(true)
+  const [viewport, setViewport] = useState<Viewport>(viewportRef.current)
+  const [stageAspect, setStageAspect] = useState("16 / 10")
+
+  const modeRef = useRef(mode)
+  modeRef.current = mode
+  const manualRef = useRef(manual)
+  manualRef.current = manual
   const voiceRef = useRef(voice)
   voiceRef.current = voice
+  const autoRef = useRef(autoDetect)
+  autoRef.current = autoDetect
+  const showModelRef = useRef(showModel)
+  showModelRef.current = showModel
+  const sensitivityRef = useRef(sensitivity)
+  sensitivityRef.current = sensitivity
+  lastScoreRef.current = lastScore
+
   const lastSpokenRef = useRef(0)
 
   const speakLabel = useCallback((label: string) => {
@@ -161,6 +228,12 @@ export function CameraLabPage() {
     synth.speak(utterance)
   }, [])
 
+  const pushRecord = useCallback((record: SessionDart) => {
+    sessionRef.current = [...sessionRef.current, record].slice(-500)
+    setSession(sessionRef.current)
+    saveSession(sessionRef.current)
+  }, [])
+
   const updateRecord = useCallback((id: string, patch: Partial<SessionDart>) => {
     sessionRef.current = sessionRef.current.map((record) =>
       record.id === id ? { ...record, ...patch } : record,
@@ -168,30 +241,6 @@ export function CameraLabPage() {
     setSession(sessionRef.current)
     saveSession(sessionRef.current)
   }, [])
-
-  const [phase, setPhase] = useState<Phase>("idle")
-  const [mode, setMode] = useState<Mode>("calibrating")
-  const [error, setError] = useState<string | null>(null)
-  const [calibrationVersion, setCalibrationVersion] = useState(0)
-  const [tapCount, setTapCount] = useState(0)
-  const [autoDetect, setAutoDetect] = useState(true)
-  const [showModel, setShowModel] = useState(true)
-  const [sensitivity, setSensitivity] = useState(35)
-  const [lastScore, setLastScore] = useState<{ score: BoardScore; at: Point } | null>(null)
-  const [hud, setHud] = useState<Hud>({ fps: 0, ms: 0, mmPerPx: 0 })
-  const sessionRef = useRef<SessionDart[]>(loadSession())
-  const [session, setSession] = useState<SessionDart[]>(sessionRef.current)
-  const [pendingConfidence, setPendingConfidence] = useState<number | null>(null)
-
-  const modeRef = useRef(mode)
-  modeRef.current = mode
-  const autoRef = useRef(autoDetect)
-  autoRef.current = autoDetect
-  const showModelRef = useRef(showModel)
-  showModelRef.current = showModel
-  const sensitivityRef = useRef(sensitivity)
-  sensitivityRef.current = sensitivity
-  lastScoreRef.current = lastScore
 
   const calibrated = calibrationVersion > 0
 
@@ -209,6 +258,8 @@ export function CameraLabPage() {
     calibrationPxRef.current = pixels
     setCalibrationVersion((version) => version + 1)
     setMode("live")
+    setManual(false)
+    setReferenceSet(false)
     setError(null)
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(pixels))
@@ -226,6 +277,11 @@ export function CameraLabPage() {
     if (videoRef.current) videoRef.current.srcObject = null
     dartsRef.current = []
     backgroundRef.current = null
+    pointersRef.current.clear()
+    gestureRef.current = null
+    viewportRef.current = { zoom: 1, center: { x: 0, y: 0 } }
+    setViewport(viewportRef.current)
+    setReferenceSet(false)
     setPhase("idle")
   }, [])
 
@@ -270,6 +326,24 @@ export function CameraLabPage() {
     }
   }, [phase, calibrated, applyCalibration])
 
+  const applyViewport = useCallback((next: Viewport, width: number, height: number) => {
+    const clamped = clampViewport(next, width, height)
+    viewportRef.current = clamped
+    setViewport(clamped)
+  }, [])
+
+  const setDigitalZoom = useCallback(
+    (zoom: number) => {
+      const video = videoRef.current
+      applyViewport(
+        { zoom: clampZoom(zoom), center: viewportRef.current.center },
+        video?.videoWidth ?? 0,
+        video?.videoHeight ?? 0,
+      )
+    },
+    [applyViewport],
+  )
+
   const setBackground = useCallback(() => {
     const video = videoRef.current
     const detect = detectCanvasRef.current
@@ -281,6 +355,7 @@ export function CameraLabPage() {
     backgroundRef.current = toGrayscale(image.data, detect.width, detect.height)
     dartsRef.current = []
     setLastScore(null)
+    setReferenceSet(true)
   }, [])
 
   const resetCalibration = useCallback(() => {
@@ -291,14 +366,32 @@ export function CameraLabPage() {
     dartsRef.current = []
     setCalibrationVersion(0)
     setTapCount(0)
+    setManual(false)
     setMode("calibrating")
     setPendingConfidence(null)
+    setReferenceSet(false)
     setLastScore(null)
     try {
       localStorage.removeItem(STORAGE_KEY)
     } catch {
       // ignore
     }
+  }, [])
+
+  const startManual = useCallback(() => {
+    calibrationPxRef.current = []
+    pendingBoardRef.current = null
+    setTapCount(0)
+    setManual(true)
+    setMode("calibrating")
+    setPendingConfidence(null)
+    setError(null)
+  }, [])
+
+  const cancelManual = useCallback(() => {
+    calibrationPxRef.current = []
+    setTapCount(0)
+    setManual(false)
   }, [])
 
   const runAutoDetect = useCallback(() => {
@@ -313,7 +406,7 @@ export function CameraLabPage() {
     const found = detectBoard(gray, detect.width, detect.height)
     if (!found) {
       setError(
-        "No board found in this frame — fill the frame with the board, improve the light, or calibrate manually.",
+        "No board found in this frame — fill the frame with the board, improve the light, or calibrate by hand.",
       )
       return
     }
@@ -325,21 +418,29 @@ export function CameraLabPage() {
       confidence: found.confidence,
     }
     setPendingConfidence(found.confidence)
+    setManual(false)
     setError(null)
     setMode("rotation")
-  }, [])
 
-  const handleCanvasClick = useCallback(
-    (event: React.MouseEvent<HTMLCanvasElement>) => {
-      const canvas = canvasRef.current
-      if (!canvas) return
-      const rect = canvas.getBoundingClientRect()
-      const point: Point = {
-        x: ((event.clientX - rect.left) * canvas.width) / rect.width,
-        y: ((event.clientY - rect.top) * canvas.height) / rect.height,
-      }
+    // Frame the board for the user: the tap on the double 20 is much easier
+    // when the numbers are readable. Still adjustable with the slider.
+    const pending = pendingBoardRef.current
+    if (pending) {
+      applyViewport(
+        autoFrame(pending.center, pending.radius, video.videoWidth, video.videoHeight),
+        video.videoWidth,
+        video.videoHeight,
+      )
+    }
+  }, [applyViewport])
 
+  const handleTap = useCallback(
+    (point: Point) => {
       if (modeRef.current === "calibrating") {
+        if (!manualRef.current) {
+          setError("Tap “Find the board” first — or calibrate by hand.")
+          return
+        }
         const next = [...calibrationPxRef.current, point]
         calibrationPxRef.current = next
         setTapCount(next.length)
@@ -386,8 +487,156 @@ export function CameraLabPage() {
     [applyCalibration, pushRecord, speakLabel],
   )
 
+  const canvasPoint = useCallback((event: React.PointerEvent<HTMLCanvasElement>): Point => {
+    const canvas = canvasRef.current
+    if (!canvas) return { x: 0, y: 0 }
+    return clientToCanvas(
+      event.clientX,
+      event.clientY,
+      canvas.getBoundingClientRect(),
+      canvas.width,
+      canvas.height,
+    )
+  }, [])
+
+  const beginPan = useCallback(
+    (point: Point, moved: boolean): Gesture => {
+      const video = videoRef.current
+      const width = video?.videoWidth ?? 0
+      const height = video?.videoHeight ?? 0
+      const canvas = canvasRef.current
+      const crop = cropFor(viewportRef.current, width, height)
+      return {
+        kind: "pan",
+        startViewport: viewportRef.current,
+        startPoint: point,
+        startDistance: 0,
+        anchorVideo: screenToVideo(point, crop, canvas?.width ?? 0, canvas?.height ?? 0),
+        moved,
+        startedAt: performance.now(),
+      }
+    },
+    [],
+  )
+
+  const handlePointerDown = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      if (phase !== "live") return
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const point = canvasPoint(event)
+      pointersRef.current.set(event.pointerId, point)
+      try {
+        canvas.setPointerCapture(event.pointerId)
+      } catch {
+        // Pointer capture is best-effort.
+      }
+
+      if (pointersRef.current.size === 1) {
+        gestureRef.current = beginPan(point, false)
+        return
+      }
+
+      if (pointersRef.current.size === 2) {
+        const [a, b] = [...pointersRef.current.values()]
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+        const video = videoRef.current
+        const crop = cropFor(viewportRef.current, video?.videoWidth ?? 0, video?.videoHeight ?? 0)
+        gestureRef.current = {
+          kind: "pinch",
+          startViewport: viewportRef.current,
+          startPoint: mid,
+          startDistance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+          anchorVideo: screenToVideo(mid, crop, canvas.width, canvas.height),
+          moved: true,
+          startedAt: performance.now(),
+        }
+      }
+    },
+    [beginPan, canvasPoint, phase],
+  )
+
+  const handlePointerMove = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      if (!pointersRef.current.has(event.pointerId)) return
+      const canvas = canvasRef.current
+      const gesture = gestureRef.current
+      const video = videoRef.current
+      if (!canvas || !gesture || !video || video.videoWidth === 0) return
+
+      const point = canvasPoint(event)
+      pointersRef.current.set(event.pointerId, point)
+      const width = video.videoWidth
+      const height = video.videoHeight
+
+      if (gesture.kind === "pinch" && pointersRef.current.size >= 2) {
+        const [a, b] = [...pointersRef.current.values()]
+        const distance = Math.hypot(a.x - b.x, a.y - b.y)
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+        const zoom = clampZoom(gesture.startViewport.zoom * (distance / gesture.startDistance))
+        const fraction = { x: mid.x / canvas.width, y: mid.y / canvas.height }
+        applyViewport(viewportAnchoredOn(zoom, gesture.anchorVideo, fraction, width, height), width, height)
+        return
+      }
+
+      if (gesture.kind !== "pan" || pointersRef.current.size !== 1) return
+
+      const dx = point.x - gesture.startPoint.x
+      const dy = point.y - gesture.startPoint.y
+      if (Math.hypot(dx, dy) > 8) gesture.moved = true
+      if (!gesture.moved || gesture.startViewport.zoom <= MIN_ZOOM) return
+
+      const crop = cropFor(gesture.startViewport, width, height)
+      const scale = crop.width / canvas.width
+      applyViewport(
+        {
+          zoom: gesture.startViewport.zoom,
+          center: {
+            x: gesture.startViewport.center.x - dx * scale,
+            y: gesture.startViewport.center.y - dy * scale,
+          },
+        },
+        width,
+        height,
+      )
+    },
+    [applyViewport, canvasPoint],
+  )
+
+  const handlePointerUp = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const point = pointersRef.current.get(event.pointerId) ?? canvasPoint(event)
+      pointersRef.current.delete(event.pointerId)
+      const gesture = gestureRef.current
+      gestureRef.current = null
+
+      // One finger lifted while another is still down: keep panning with it.
+      if (pointersRef.current.size === 1) {
+        const remaining = [...pointersRef.current.values()][0]
+        gestureRef.current = beginPan(remaining, true)
+        return
+      }
+
+      if (!gesture) return
+      if (gesture.kind === "pan" && !gesture.moved && performance.now() - gesture.startedAt < 600) {
+        const video = videoRef.current
+        const crop = cropFor(viewportRef.current, video?.videoWidth ?? 0, video?.videoHeight ?? 0)
+        handleTap(screenToVideo(point, crop, canvas.width, canvas.height))
+      }
+    },
+    [beginPan, canvasPoint, handleTap],
+  )
+
+  const handlePointerCancel = useCallback(() => {
+    pointersRef.current.clear()
+    gestureRef.current = null
+  }, [])
+
   // Render + detection loop. Restarts when the calibration or the model
-  // visibility changes, because the static overlay is cached per run.
+  // visibility changes, because the static overlay is cached per run. Zooming
+  // is applied per frame, so it never restarts the loop.
   useEffect(() => {
     if (phase !== "live") return
     const video = videoRef.current
@@ -402,24 +651,27 @@ export function CameraLabPage() {
     let stopped = false
     let overlay: HTMLCanvasElement | null = null
     let hudAt = 0
+    let aspect = ""
 
     const buildOverlay = (): HTMLCanvasElement | null => {
       const inverse = inverseRef.current
-      if (!inverse || !showModelRef.current) return null
+      const width = video.videoWidth
+      const height = video.videoHeight
+      if (!inverse || !showModelRef.current || width === 0 || height === 0) return null
 
       const buffer = staticOverlayRef.current ?? document.createElement("canvas")
       staticOverlayRef.current = buffer
-      if (buffer.width !== canvas.width || buffer.height !== canvas.height) {
-        buffer.width = canvas.width
-        buffer.height = canvas.height
+      if (buffer.width !== width || buffer.height !== height) {
+        buffer.width = width
+        buffer.height = height
       }
       const bctx = buffer.getContext("2d")
       if (!bctx) return null
 
-      bctx.clearRect(0, 0, buffer.width, buffer.height)
+      bctx.clearRect(0, 0, width, height)
       const toPixel = (point: Point) => applyHomography(inverse, point)
 
-      bctx.lineWidth = Math.max(1.5, canvas.width / 700)
+      bctx.lineWidth = Math.max(1.5, width / 700)
       bctx.strokeStyle = "rgba(56, 189, 248, 0.85)"
       drawPolygon(bctx, ringPolygon(BOARD.doubleOuter), toPixel)
       drawPolygon(bctx, ringPolygon(BOARD.tripleOuter), toPixel)
@@ -437,7 +689,7 @@ export function CameraLabPage() {
       }
 
       bctx.fillStyle = "rgba(226, 232, 240, 0.95)"
-      bctx.font = `600 ${Math.max(12, canvas.width / 45)}px system-ui, sans-serif`
+      bctx.font = `600 ${Math.max(12, width / 45)}px system-ui, sans-serif`
       bctx.textAlign = "center"
       bctx.textBaseline = "middle"
       for (const segment of SEGMENTS) {
@@ -448,52 +700,11 @@ export function CameraLabPage() {
       bctx.fillStyle = "rgba(250, 204, 21, 0.95)"
       for (const pixel of calibrationPxRef.current) {
         bctx.beginPath()
-        bctx.arc(pixel.x, pixel.y, Math.max(3, canvas.width / 220), 0, Math.PI * 2)
+        bctx.arc(pixel.x, pixel.y, Math.max(3, width / 220), 0, Math.PI * 2)
         bctx.fill()
       }
 
       return buffer
-    }
-
-    const drawDetections = () => {
-      const darts = dartsRef.current
-      if (darts.length === 0) return
-
-      ctx.lineWidth = Math.max(2, canvas.width / 400)
-      for (const dart of darts) {
-        const { a, b } = dart
-        ctx.strokeStyle = "rgba(250, 204, 21, 0.9)"
-        ctx.beginPath()
-        ctx.moveTo(a.x, a.y)
-        ctx.lineTo(b.x, b.y)
-        ctx.stroke()
-
-        const markers: [Point, BoardScore, string][] = [
-          [a, dart.scoreA, "#fbbf24"],
-          [b, dart.scoreB, "#f472b6"],
-        ]
-        for (const [point, score, colour] of markers) {
-          ctx.beginPath()
-          ctx.arc(point.x, point.y, Math.max(4, canvas.width / 160), 0, Math.PI * 2)
-          ctx.fillStyle = colour
-          ctx.fill()
-          ctx.strokeStyle = "rgba(0,0,0,0.7)"
-          ctx.stroke()
-
-          const fontSize = Math.max(14, canvas.width / 34)
-          ctx.font = `700 ${fontSize}px system-ui, sans-serif`
-          ctx.textAlign = "left"
-          ctx.textBaseline = "middle"
-          const padding = fontSize * 0.3
-          const width = ctx.measureText(score.label).width + padding * 2
-          const x = point.x + fontSize * 0.6
-          const y = point.y - fontSize * 0.9
-          ctx.fillStyle = "rgba(2, 6, 23, 0.8)"
-          ctx.fillRect(x - padding, y - fontSize / 2 - padding, width, fontSize + padding * 2)
-          ctx.fillStyle = colour
-          ctx.fillText(score.label, x, y)
-        }
-      }
     }
 
     const detectDarts = (now: number) => {
@@ -585,33 +796,104 @@ export function CameraLabPage() {
         detect.width = Math.min(DETECT_WIDTH, video.videoWidth)
         detect.height = Math.round((detect.width * video.videoHeight) / video.videoWidth)
         staticOverlayRef.current = null
-        overlay = buildOverlay()
+        overlay = null
+
+        const ratio = video.videoWidth / video.videoHeight
+        const nextAspect = ratio.toFixed(3)
+        if (nextAspect !== aspect) {
+          aspect = nextAspect
+          setStageAspect(nextAspect)
+        }
       }
 
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+      const crop = cropFor(viewportRef.current, canvas.width, canvas.height)
+      const toScreen = (point: Point) => videoToScreen(point, crop, canvas.width, canvas.height)
+
+      ctx.drawImage(video, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height)
       if (!overlay) overlay = buildOverlay()
-      if (overlay) ctx.drawImage(overlay, 0, 0)
+      if (overlay) {
+        ctx.drawImage(overlay, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height)
+      }
 
       const pending = pendingBoardRef.current
       if (pending) {
+        const centre = toScreen(pending.center)
+        const radius = (pending.radius * canvas.width) / crop.width
+        ctx.setLineDash([10, 8])
         ctx.strokeStyle = "rgba(56, 189, 248, 0.95)"
         ctx.lineWidth = Math.max(2, canvas.width / 400)
         ctx.beginPath()
-        ctx.arc(pending.center.x, pending.center.y, pending.radius, 0, Math.PI * 2)
+        ctx.arc(centre.x, centre.y, radius, 0, Math.PI * 2)
         ctx.stroke()
+        ctx.setLineDash([])
+
+        // A dot at the top of the board: the double 20 when the phone is upright.
+        const dotRadius = Math.max(16, canvas.width / 55)
+        const hintY = Math.max(dotRadius + 6, centre.y - radius)
+        ctx.beginPath()
+        ctx.arc(centre.x, hintY, dotRadius, 0, Math.PI * 2)
+        ctx.fillStyle = "rgba(56, 189, 248, 0.95)"
+        ctx.fill()
+        ctx.lineWidth = Math.max(2, canvas.width / 500)
+        ctx.strokeStyle = "rgba(2, 6, 23, 0.85)"
+        ctx.stroke()
+        ctx.fillStyle = "#0f172a"
+        ctx.font = `700 ${dotRadius * 0.95}px system-ui, sans-serif`
+        ctx.textAlign = "center"
+        ctx.textBaseline = "middle"
+        ctx.fillText("20", centre.x, hintY + dotRadius * 0.04)
       }
 
       const tap = lastScoreRef.current
       if (tap) {
+        const marker = toScreen(tap.at)
         ctx.beginPath()
-        ctx.arc(tap.at.x, tap.at.y, Math.max(5, canvas.width / 140), 0, Math.PI * 2)
+        ctx.arc(marker.x, marker.y, Math.max(5, canvas.width / 140), 0, Math.PI * 2)
         ctx.fillStyle = "rgba(34, 197, 94, 0.95)"
         ctx.fill()
       }
 
-      drawDetections()
+      const darts = dartsRef.current
+      if (darts.length > 0) {
+        ctx.lineWidth = Math.max(2, canvas.width / 400)
+        for (const dart of darts) {
+          const a = toScreen(dart.a)
+          const b = toScreen(dart.b)
+          ctx.strokeStyle = "rgba(250, 204, 21, 0.9)"
+          ctx.beginPath()
+          ctx.moveTo(a.x, a.y)
+          ctx.lineTo(b.x, b.y)
+          ctx.stroke()
 
-      if (modeRef.current === "live") detectDarts(now)
+          const markers: [Point, BoardScore, string][] = [
+            [a, dart.scoreA, "#fbbf24"],
+            [b, dart.scoreB, "#f472b6"],
+          ]
+          for (const [point, score, colour] of markers) {
+            ctx.beginPath()
+            ctx.arc(point.x, point.y, Math.max(4, canvas.width / 160), 0, Math.PI * 2)
+            ctx.fillStyle = colour
+            ctx.fill()
+            ctx.strokeStyle = "rgba(0,0,0,0.7)"
+            ctx.stroke()
+
+            const fontSize = Math.max(14, canvas.width / 34)
+            ctx.font = `700 ${fontSize}px system-ui, sans-serif`
+            ctx.textAlign = "left"
+            ctx.textBaseline = "middle"
+            const padding = fontSize * 0.3
+            const width = ctx.measureText(score.label).width + padding * 2
+            const x = point.x + fontSize * 0.6
+            const y = point.y - fontSize * 0.9
+            ctx.fillStyle = "rgba(2, 6, 23, 0.8)"
+            ctx.fillRect(x - padding, y - fontSize / 2 - padding, width, fontSize + padding * 2)
+            ctx.fillStyle = colour
+            ctx.fillText(score.label, x, y)
+          }
+        }
+      }
+
+      if (modeRef.current === "live" && backgroundRef.current) detectDarts(now)
 
       frameTimesRef.current.push(now)
       if (now - hudAt > 500) {
@@ -639,7 +921,8 @@ export function CameraLabPage() {
 
   useEffect(() => () => stopCamera(), [stopCamera])
 
-  const calibrationHint = CALIBRATION_TARGETS[Math.min(tapCount, 3)].label
+  const stepIndex =
+    phase !== "live" ? 0 : mode === "calibrating" ? 1 : mode === "rotation" ? 2 : referenceSet ? 4 : 3
 
   const autoDarts = session.filter((record) => record.method === "auto")
   const confirmed = autoDarts.filter((record) => record.chosen !== null)
@@ -674,6 +957,7 @@ export function CameraLabPage() {
         points: calibrationPxRef.current,
         mmPerPx: hud.mmPerPx,
       },
+      zoom: viewport.zoom,
       summary: {
         darts: autoDarts.length,
         confirmed: confirmed.length,
@@ -691,6 +975,8 @@ export function CameraLabPage() {
     URL.revokeObjectURL(url)
   }
 
+  const calibratingTarget = CALIBRATION_TARGETS[Math.min(tapCount, 3)].label
+
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-3 px-3 py-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -707,15 +993,39 @@ export function CameraLabPage() {
         {calibrated && <Badge variant="outline">calibrated</Badge>}
       </div>
 
+      <div aria-hidden="true">
+        <div className="flex gap-1">
+          {STEPS.map((step, index) => (
+            <span
+              key={step}
+              className={cn(
+                "h-1.5 flex-1 rounded-full",
+                index < stepIndex
+                  ? "bg-emerald-500"
+                  : index === stepIndex
+                    ? "bg-sky-500"
+                    : "bg-muted",
+              )}
+            />
+          ))}
+        </div>
+      </div>
+
       <div
         className="relative overflow-hidden rounded-lg border border-border bg-black"
-        style={{ aspectRatio: "16 / 10" }}
+        style={{ aspectRatio: stageAspect, maxHeight: "62vh" }}
       >
         <video ref={videoRef} muted playsInline className="hidden" />
         <canvas
           ref={canvasRef}
-          onClick={handleCanvasClick}
-          className={cn("h-full w-full object-contain", phase === "live" ? "cursor-crosshair" : "opacity-0")}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          className={cn(
+            "h-full w-full touch-none object-contain select-none",
+            phase === "live" ? "cursor-crosshair" : "pointer-events-none opacity-0",
+          )}
         />
         <canvas ref={detectCanvasRef} className="hidden" />
 
@@ -723,110 +1033,131 @@ export function CameraLabPage() {
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-sm text-slate-300">
             <Camera className="h-8 w-8" aria-hidden="true" />
             <p className="max-w-xs">
-              Point the rear camera at the board from about 1.5–2 m, fill the frame, then start. Needs HTTPS and
+              Hold the phone in portrait, about 1.5–2 m from the board, and fill the frame with it. Needs HTTPS and
               camera permission.
             </p>
           </div>
         )}
       </div>
 
+      {phase === "live" && (
+        <div className="flex items-center gap-2 rounded-lg border border-border px-2 py-1.5">
+          <ZoomOut className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <input
+            type="range"
+            min={MIN_ZOOM}
+            max={MAX_ZOOM}
+            step={0.1}
+            value={viewport.zoom}
+            onChange={(event) => setDigitalZoom(Number(event.target.value))}
+            className="min-w-0 flex-1 accent-sky-500"
+            aria-label="Zoom"
+          />
+          <ZoomIn className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <span className="w-12 shrink-0 text-right text-xs tabular-nums">{viewport.zoom.toFixed(1)}×</span>
+          <Button
+            size="icon"
+            variant="ghost"
+            className="size-9 shrink-0"
+            aria-label={voice ? "Mute voice feedback" : "Enable voice feedback"}
+            aria-pressed={voice}
+            onClick={() => {
+              const next = !voice
+              setVoice(next)
+              if (next) speakLabel("triple 20")
+            }}
+          >
+            {voice ? <Volume2 className="size-4" /> : <VolumeX className="size-4" />}
+          </Button>
+        </div>
+      )}
+
+      {phase === "live" && viewport.zoom > 1 && (
+        <p className="-mt-1 text-xs text-muted-foreground">Drag the image to move · pinch to zoom</p>
+      )}
+
+      <div className="rounded-lg border border-sky-500/40 bg-sky-500/5 p-3">
+        <p className="text-sm font-semibold">
+          Step {stepIndex + 1} of {STEPS.length} — {STEPS[stepIndex]}
+        </p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {stepIndex === 0 &&
+            "Start the rear camera. You can zoom with the slider, and pinch or drag the image once it is running."}
+          {stepIndex === 1 &&
+            (manual
+              ? `Tap the outer wire of the double ${calibratingTarget} — ${tapCount}/4 points. Do one number at a time: 20, 6, 3, 11.`
+              : "Tap “Find the board”. If it fails, fill the frame with the board and try again, or calibrate by hand with 4 taps.")}
+          {stepIndex === 2 && (
+            <>
+              Board found
+              {pendingConfidence ? ` (${Math.round(pendingConfidence * 100)}% confident)` : ""} and zoomed in on
+              it. Now tap the <strong className="text-foreground">middle of the double 20</strong> — the segment at
+              the top of the board, on the image above.
+            </>
+          )}
+          {stepIndex === 3 &&
+            "Take every dart off the board, then tap “Board is empty”. The detector compares each frame against this reference."}
+          {stepIndex === 4 &&
+            "Throw. Each dart is spoken out loud and logged. Pick A or B (which tip is the point) or Discard. After pulling the darts out, tap “Board is empty” again to reset the round."}
+        </p>
+        {manual && <p className="mt-1 text-sm text-muted-foreground">Next: double {calibratingTarget}</p>}
+      </div>
+
       {error && <p className="text-sm text-destructive">{error}</p>}
 
-      {phase === "live" && mode === "calibrating" && (
-        <p className="text-sm text-muted-foreground">
-          Tap the <strong className="text-foreground">outer wire of the double “{calibrationHint}”</strong> —{" "}
-          {tapCount}/4 points.{tapCount === 0 && " Or use “Detect board” for a one-tap setup."}
-        </p>
-      )}
-
-      {phase === "live" && mode === "rotation" && (
-        <p className="text-sm text-muted-foreground">
-          Board found{pendingConfidence ? ` (confidence ${(pendingConfidence * 100).toFixed(0)}%)` : ""}. Now tap
-          the <strong className="text-foreground">middle of the double 20</strong> to set the rotation.
-        </p>
-      )}
-
-      {phase === "live" && mode === "live" && (
-        <p className="text-sm text-muted-foreground">
-          Tap any point to read its score. Set an empty-board reference, then throw — each new dart shows two
-          candidate tips (yellow = start, pink = end) with their scores.
-        </p>
-      )}
-
-      <div className="grid grid-cols-2 gap-2">
-        {phase !== "live" ? (
-          <Button className="min-h-11" onClick={startCamera} disabled={phase === "starting"}>
+      <div className="flex flex-col gap-2">
+        {stepIndex === 0 && (
+          <Button className="min-h-12" onClick={startCamera} disabled={phase === "starting"}>
             <Camera /> {phase === "starting" ? "Starting…" : "Start camera"}
           </Button>
-        ) : (
-          <Button variant="outline" className="min-h-11" onClick={stopCamera}>
-            <CameraOff /> Stop
+        )}
+        {stepIndex === 1 && (
+          <Button className="min-h-12" onClick={runAutoDetect}>
+            <ScanLine /> Find the board
+          </Button>
+        )}
+        {stepIndex === 2 && (
+          <Button className="min-h-12" variant="outline" disabled>
+            <MousePointerClick /> Tap the double 20 above
+          </Button>
+        )}
+        {(stepIndex === 3 || stepIndex === 4) && (
+          <Button
+            className="min-h-12"
+            variant={stepIndex === 4 ? "outline" : "default"}
+            onClick={setBackground}
+          >
+            <Crosshair /> Board is empty
           </Button>
         )}
 
-        <Button variant="outline" className="min-h-11" onClick={runAutoDetect} disabled={phase !== "live"}>
-          <ScanLine /> Detect board
-        </Button>
-
-        <Button variant="outline" className="min-h-11" onClick={setBackground} disabled={!calibrated}>
-          <Crosshair /> Empty board
-        </Button>
-
-        <Button variant="outline" className="min-h-11" onClick={resetCalibration} disabled={phase !== "live"}>
-          <RefreshCw /> Recalibrate
-        </Button>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-4 rounded-lg border border-border p-3 text-sm">
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={autoDetect}
-            onChange={(event) => setAutoDetect(event.target.checked)}
-            className="h-5 w-5"
-          />
-          Auto-detect darts
-        </label>
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={showModel}
-            onChange={(event) => setShowModel(event.target.checked)}
-            className="h-5 w-5"
-          />
-          Show board model
-        </label>
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={voice}
-            onChange={(event) => {
-              setVoice(event.target.checked)
-              if (event.target.checked) speakLabel("triple 20")
-            }}
-            className="h-5 w-5"
-          />
-          Voice
-        </label>
-        <label className="flex min-w-40 flex-1 items-center gap-2">
-          <span className="whitespace-nowrap">Sensitivity</span>
-          <input
-            type="range"
-            min={10}
-            max={80}
-            value={sensitivity}
-            onChange={(event) => setSensitivity(Number(event.target.value))}
-            className="w-full accent-sky-500"
-          />
-          <span className="w-8 tabular-nums">{sensitivity}</span>
-        </label>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-        <span>{hud.fps} fps</span>
-        <span>{hud.ms.toFixed(0)} ms/frame</span>
-        <span>{hud.mmPerPx ? `${hud.mmPerPx.toFixed(2)} mm/px` : "not calibrated"}</span>
-        {lastScore && <span>last tap: {lastScore.score.label}</span>}
+        {phase === "live" && (
+          <div className="flex flex-wrap gap-2">
+            {stepIndex === 1 && !manual && (
+              <Button size="sm" variant="ghost" onClick={startManual}>
+                <Crosshair /> Calibrate by hand
+              </Button>
+            )}
+            {manual && (
+              <Button size="sm" variant="ghost" onClick={cancelManual}>
+                Cancel
+              </Button>
+            )}
+            {stepIndex >= 2 && (
+              <Button size="sm" variant="ghost" onClick={runAutoDetect}>
+                <ScanLine /> Detect again
+              </Button>
+            )}
+            {stepIndex >= 2 && (
+              <Button size="sm" variant="ghost" onClick={resetCalibration}>
+                <RefreshCw /> Recalibrate
+              </Button>
+            )}
+            <Button size="sm" variant="ghost" onClick={stopCamera}>
+              <CameraOff /> Stop camera
+            </Button>
+          </div>
+        )}
       </div>
 
       {pendingDart && (
@@ -845,6 +1176,49 @@ export function CameraLabPage() {
           </div>
         </div>
       )}
+
+      <details className="rounded-lg border border-border p-3 text-sm">
+        <summary className="cursor-pointer select-none font-medium">Detection settings</summary>
+        <div className="mt-3 flex flex-col gap-3">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={autoDetect}
+              onChange={(event) => setAutoDetect(event.target.checked)}
+              className="h-5 w-5"
+            />
+            Auto-detect darts
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={showModel}
+              onChange={(event) => setShowModel(event.target.checked)}
+              className="h-5 w-5"
+            />
+            Show board model
+          </label>
+          <label className="flex items-center gap-2">
+            <span className="whitespace-nowrap">Sensitivity</span>
+            <input
+              type="range"
+              min={10}
+              max={80}
+              value={sensitivity}
+              onChange={(event) => setSensitivity(Number(event.target.value))}
+              className="w-full accent-sky-500"
+            />
+            <span className="w-8 tabular-nums">{sensitivity}</span>
+          </label>
+        </div>
+      </details>
+
+      <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+        <span>{hud.fps} fps</span>
+        <span>{hud.ms.toFixed(0)} ms/frame</span>
+        <span>{hud.mmPerPx ? `${hud.mmPerPx.toFixed(2)} mm/px` : "not calibrated"}</span>
+        {lastScore && <span>last tap: {lastScore.score.label}</span>}
+      </div>
 
       <div className="rounded-lg border border-border p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">

@@ -206,16 +206,37 @@ navegação principal.
 
 ### O que faz
 
+O ecrã guia **5 passos**, com barra de progresso e um único botão principal que
+faz sempre a próxima ação: `Camera → Find board → Set rotation → Empty board →
+Throw`.
+
 | Passo | Comportamento |
 | --- | --- |
-| 1. Câmara | `getUserMedia` traseira, 1920×1080 pedidos, processamento a ~12 fps numa cópia de 640 px |
-| 2. Calibração | **Automática**: deteta o tabuleiro (Hough + refinamento sub-pixel) e pede **um toque** na dupla 20 para fixar a rotação. **Manual**: 4 toques (20, 6, 3, 11) na dupla exterior |
-| 3. Modelo | Desenha por cima do vídeo a dupla, o triplo, o bull, os 20 sectores e os números — serve de verificação visual imediata |
-| 4. Pontuação | Tocar em qualquer ponto devolve o score exato (geometria oficial, validada com 60 pontos de referência) |
-| 5. Deteção | Diferença de frames contra uma referência de "tabuleiro vazio" → componentes conexas → eixo principal → **dois candidatos** de ponta, cada um com o seu score |
-| 6. Voz | Fala em inglês o valor detetado ("triple twenty", "double five", "fifty. Bullseye.") via Web Speech API |
-| 7. Registo | Cada dardo é gravado automaticamente na sessão; confirmas com um toque em **A** ou **B** (sem apontar) ou descartas |
-| 8. Exportação | `Export JSON` com calibração, mm/px, resumo e todos os registos — é este ficheiro que permite afinar a deteção |
+| 1. Câmara | `getUserMedia` traseira, 1920×1080 pedidos, processamento a ~12 fps numa cópia de 640 px. Botão principal: `Start camera` |
+| 2. Encontrar | `Find the board` deteta o tabuleiro (Hough + refinamento sub-pixel). Falha → `Calibrate by hand` (4 toques: 20, 6, 3, 11 na dupla exterior) |
+| 3. Rotação | **A app enquadra o tabuleiro sozinha** (zoom automático, ~82% do lado menor) e pede **um toque** no meio da dupla 20, marcada com um ponto azul “20” |
+| 4. Referência | `Board is empty` guarda o tabuleiro vazio como referência da diferença de frames |
+| 5. Lançar | Cada dardo é falado e registado; confirmas **A** ou **B** (qual é a ponta) ou `Discard`. `Board is empty` outra vez repõe a referência entre rondas |
+| Modelo | Desenha por cima do vídeo a dupla, o triplo, o bull, os 20 sectores e os números — verificação visual imediata |
+| Pontuação | Tocar em qualquer ponto devolve o score exato (geometria oficial, validada com 60 pontos de referência) |
+| Deteção | Diferença de frames contra a referência → componentes conexas → eixo principal → **dois candidatos** de ponta, cada um com o seu score |
+| Voz | Fala em inglês o valor detetado ("triple twenty", "double five", "fifty. Bullseye.") via Web Speech API; toggle no ícone de coluna |
+| Registo | Cada dardo é gravado automaticamente na sessão; um toque em **A**/**B** confirma |
+| Exportação | `Export JSON` com calibração, mm/px, zoom, resumo e todos os registos — é este ficheiro que permite afinar a deteção |
+
+### Zoom
+
+O zoom é **digital e só de visualização**: recorta o que é mostrado e ajusta o
+mapa de toques, mas a deteção continua a correr no frame inteiro. Por isso
+ampliar nunca invalida a calibração nem a referência do tabuleiro vazio.
+
+- **Ajusta-se sozinho** ao encontrar o tabuleiro (passo 3): o tabuleiro passa a
+  ocupar ~82% do lado menor da imagem, para os números ficarem legíveis.
+- **Depois é teu**: slider de 1× a 4×, pinça para ampliar e arrastar para mover.
+  Arrastar nunca conta como toque de pontuação.
+- A câmara nativa (zoom óptico do telemóvel) não é usada de propósito: expõe-se
+  de forma inconsistente entre Android/iOS e tornaria a calibração dependente
+  do modelo do telefone.
 
 ### Porque é que a confirmação A/B é o dado mais valioso
 
@@ -230,7 +251,8 @@ A (aí o app pode passar a decidir sozinho) e qual é a taxa de acerto por zona
    dá para testar por `npm run dev` na rede local.
 2. Abrir `https://darts-tournament.f-piscinato.workers.dev/camera-lab` no Chrome.
 3. Telemóvel fixo, 1,5–2 m, tabuleiro a ocupar ~60% do ecrã, luz sem reflexos diretos.
-4. `Start camera` → `Detect board` → tocar na dupla 20 → `Empty board`.
+4. `Start camera` → `Find the board` → tocar na dupla 20 (ponto azul “20”) →
+   `Board is empty`. Usa o slider/pinça se quiseres ver o tabuleiro maior.
 5. Lançar 10–15 dardos, confirmando A/B e corrigindo com um toque quando falhar.
 6. `Export JSON` e enviar o ficheiro.
 
