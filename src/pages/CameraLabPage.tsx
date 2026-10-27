@@ -4,9 +4,9 @@ import {
   ArrowLeft,
   Camera,
   CameraOff,
+  Check,
   Crosshair,
   Download,
-  MousePointerClick,
   RefreshCw,
   Scan,
   ScanLine,
@@ -27,13 +27,14 @@ import {
   segmentSpokes,
 } from "@/lib/darts/boardGeometry"
 import type { BoardScore, Point } from "@/lib/darts/boardGeometry"
-import { detectBoard } from "@/lib/darts/boardDetector"
+import { detectBoard, refineBoard } from "@/lib/darts/boardDetector"
 import { applyHomography, invertHomography, solveHomography } from "@/lib/darts/homography"
 import type { Homography } from "@/lib/darts/homography"
 import {
   changedRatio,
   connectedComponents,
   differenceMask,
+  meanLuma,
   toGrayscale,
 } from "@/lib/darts/dartDetection"
 import {
@@ -49,16 +50,29 @@ import {
   viewportAnchoredOn,
 } from "@/lib/darts/viewport"
 import type { Viewport } from "@/lib/darts/viewport"
+import { useWakeLock } from "@/hooks/useWakeLock"
 import { cn } from "@/lib/utils"
 
 /** Radius (mm) where a manual tap lands when the user taps the outer wire of
  * the double ring. */
 const MANUAL_RING_MM = BOARD.doubleOuter
-/** The automatic detector locks onto the middle of the double wire pair
- * (162–170 mm), so its radius corresponds to ~166 mm. */
+/** The Hough pass locks onto the middle of the double wire pair (162–170 mm)
+ * when the fingerprint refinement cannot be used, so its radius corresponds
+ * to ~166 mm. `refineBoard` instead returns the outer wire (170 mm). */
 const AUTO_RING_MM = (BOARD.doubleInner + BOARD.doubleOuter) / 2
-/** Processing resolution for differencing; 640 px keeps a dart ~40 px long. */
-const DETECT_WIDTH = 640
+/** Long side, in pixels, of the small frame used for the Hough seed. Running
+ * the Hough at full detection resolution would need a ~380 MB accumulator on a
+ * 1080p frame; the fingerprint refinement then works on the full frame. */
+const SEED_LONG_SIDE = 640
+/** Processing resolution for differencing; 1280 px keeps a dart ~60 px long on
+ * a board that fills a third of a 1080p frame, which is the difference between
+ * seeing a dart and seeing noise. */
+const DETECT_WIDTH = 1280
+/** Minimum time between two logged darts, so one noisy frame cannot flood the
+ * session. A real visit cannot throw faster than this anyway. */
+const RECORD_COOLDOWN_MS = 900
+/** Two detections whose tips are this close (mm) are the same dart. */
+const SAME_DART_MM = 14
 const STORAGE_KEY = "darts.cameraLab.calibration.v1"
 
 type Phase = "idle" | "starting" | "live" | "error"
@@ -69,6 +83,11 @@ interface DetectedDart {
   b: Point
   scoreA: BoardScore
   scoreB: BoardScore
+  /** Both tips in board millimetres, used for dedupe and the export. */
+  aMm: Point
+  bMm: Point
+  /** Major-axis length in millimetres, for filtering shadows and reflections. */
+  lengthMm: number
   age: number
 }
 
@@ -88,11 +107,33 @@ interface SessionDart {
   candidateB: string | null
   chosen: string | null
   discarded: boolean
+  /** Both tips in board millimetres, for tuning the detector from the export. */
+  aMm?: Point
+  bMm?: Point
+  /** Detected major-axis length, in millimetres. */
+  lengthMm?: number
+}
+
+interface KnownDart {
+  aMm: Point
+  bMm: Point
+}
+
+function distance(a: Point, b: Point): number {
+  return Math.hypot(a.x - b.x, a.y - b.y)
+}
+
+/** True when a new detection lands on a dart that is already logged. */
+function isSameDart(a: Point, b: Point, known: KnownDart): boolean {
+  return (
+    Math.min(distance(a, known.aMm), distance(a, known.bMm), distance(b, known.aMm), distance(b, known.bMm)) <
+    SAME_DART_MM
+  )
 }
 
 const SESSION_KEY = "darts.cameraLab.session.v1"
 
-const STEPS = ["Camera", "Find board", "Set rotation", "Empty board", "Throw"] as const
+const STEPS = ["Camera", "Find board", "Check board", "Empty board", "Throw"] as const
 
 /** Turn a score label into something a speech engine reads naturally. */
 function scoreSpeech(label: string): string {
@@ -164,6 +205,7 @@ export function CameraLabPage() {
   const rafRef = useRef<number | null>(null)
   const detectCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const backgroundRef = useRef<Uint8ClampedArray | null>(null)
+  const backgroundMeanRef = useRef(0)
   const staticOverlayRef = useRef<HTMLCanvasElement | null>(null)
   const lastProcessRef = useRef(0)
   const lastDurationRef = useRef(0)
@@ -172,12 +214,24 @@ export function CameraLabPage() {
   const calibrationPxRef = useRef<Point[]>([])
   const homographyRef = useRef<Homography | null>(null)
   const inverseRef = useRef<Homography | null>(null)
-  const pendingBoardRef = useRef<{ center: Point; radius: number; confidence: number } | null>(null)
+  const pendingBoardRef = useRef<{
+    center: Point
+    radius: number
+    confidence: number
+    /** Which board ring the radius describes, in mm. */
+    ringMm: number
+  } | null>(null)
   const dartsRef = useRef<DetectedDart[]>([])
+  const knownDartsRef = useRef<KnownDart[]>([])
+  const lastRecordAtRef = useRef(0)
+  const pendingAngleRef = useRef(-90)
+  const boardScaleRef = useRef(1)
   const lastScoreRef = useRef<{ score: BoardScore; at: Point } | null>(null)
   const viewportRef = useRef<Viewport>({ zoom: 1, center: { x: 0, y: 0 } })
   const pointersRef = useRef(new Map<number, Point>())
   const gestureRef = useRef<Gesture | null>(null)
+  /** Finger position while aiming, in screen pixels; drawn as a magnifier. */
+  const loupeRef = useRef<Point | null>(null)
 
   const [phase, setPhase] = useState<Phase>("idle")
   const [mode, setMode] = useState<Mode>("calibrating")
@@ -194,9 +248,16 @@ export function CameraLabPage() {
   const sessionRef = useRef<SessionDart[]>(loadSession())
   const [session, setSession] = useState<SessionDart[]>(sessionRef.current)
   const [pendingConfidence, setPendingConfidence] = useState<number | null>(null)
+  const [boardScale, setBoardScale] = useState(1)
+  const [boardSizePercent, setBoardSizePercent] = useState<number | null>(null)
+  const [rotationDeg, setRotationDeg] = useState(-90)
   const [voice, setVoice] = useState(true)
   const [viewport, setViewport] = useState<Viewport>(viewportRef.current)
   const [stageAspect, setStageAspect] = useState("16 / 10")
+
+  // The lab runs with the phone on a mount for a whole session: keep the
+  // screen awake while the camera is actually streaming.
+  const wakeLock = useWakeLock(phase === "live")
 
   const modeRef = useRef(mode)
   modeRef.current = mode
@@ -244,7 +305,7 @@ export function CameraLabPage() {
 
   const calibrated = calibrationVersion > 0
 
-  const applyCalibration = useCallback((pixels: Point[]) => {
+  const buildHomography = useCallback((pixels: Point[]): boolean => {
     const h = solveHomography(
       pixels,
       CALIBRATION_TARGETS.map((target) => target.mm),
@@ -257,17 +318,69 @@ export function CameraLabPage() {
     inverseRef.current = invertHomography(h)
     calibrationPxRef.current = pixels
     setCalibrationVersion((version) => version + 1)
-    setMode("live")
-    setManual(false)
-    setReferenceSet(false)
     setError(null)
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(pixels))
-    } catch {
-      // Storage can be unavailable in private mode; the lab still works.
-    }
     return true
   }, [])
+
+  /** Apply the model for real: the user accepted it, so persist and move on. */
+  const applyCalibration = useCallback(
+    (pixels: Point[]) => {
+      if (!buildHomography(pixels)) return false
+      setMode("live")
+      setManual(false)
+      setReferenceSet(false)
+      // Board millimetres change meaning with a new model.
+      knownDartsRef.current = []
+      dartsRef.current = []
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(pixels))
+      } catch {
+        // Storage can be unavailable in private mode; the lab still works.
+      }
+      return true
+    },
+    [buildHomography],
+  )
+
+  /** Re-draw the model while the user adjusts size or rotation. */
+  const previewCalibration = useCallback(
+    (pixels: Point[]) => {
+      if (!buildHomography(pixels)) return false
+      setMode("rotation")
+      setManual(false)
+      setReferenceSet(false)
+      return true
+    },
+    [buildHomography],
+  )
+
+  const applyPendingModel = useCallback(
+    (scale: number, angleDeg: number) => {
+      const pending = pendingBoardRef.current
+      if (!pending) return
+      const radians = (angleDeg * Math.PI) / 180
+      const radiusPx = pending.radius * (MANUAL_RING_MM / pending.ringMm) * scale
+      const pixels: Point[] = [0, 90, 180, 270].map((offset) => {
+        const angle = radians + (offset * Math.PI) / 180
+        return {
+          x: pending.center.x + radiusPx * Math.cos(angle),
+          y: pending.center.y + radiusPx * Math.sin(angle),
+        }
+      })
+      previewCalibration(pixels)
+    },
+    [previewCalibration],
+  )
+
+  /** The user says the model matches the board: persist it and start. */
+  const acceptPendingModel = useCallback(() => {
+    const pixels = calibrationPxRef.current
+    if (pixels.length !== 4) return
+    pendingBoardRef.current = null
+    setPendingConfidence(null)
+    setTapCount(4)
+    applyCalibration(pixels)
+  }, [applyCalibration])
 
   const stopCamera = useCallback(() => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
@@ -352,8 +465,14 @@ export function CameraLabPage() {
     if (!ctx) return
     ctx.drawImage(video, 0, 0, detect.width, detect.height)
     const image = ctx.getImageData(0, 0, detect.width, detect.height)
-    backgroundRef.current = toGrayscale(image.data, detect.width, detect.height)
+    const gray = toGrayscale(image.data, detect.width, detect.height)
+    backgroundRef.current = gray
+    backgroundMeanRef.current = meanLuma(gray)
+    // A new reference means an empty board: forget which darts were logged so
+    // the next throw is never mistaken for one of them.
+    knownDartsRef.current = []
     dartsRef.current = []
+    lastRecordAtRef.current = 0
     setLastScore(null)
     setReferenceSet(true)
   }, [])
@@ -364,11 +483,16 @@ export function CameraLabPage() {
     calibrationPxRef.current = []
     pendingBoardRef.current = null
     dartsRef.current = []
+    knownDartsRef.current = []
     setCalibrationVersion(0)
     setTapCount(0)
     setManual(false)
     setMode("calibrating")
     setPendingConfidence(null)
+    setBoardSizePercent(null)
+    setRotationDeg(-90)
+    setBoardScale(1)
+    boardScaleRef.current = 1
     setReferenceSet(false)
     setLastScore(null)
     try {
@@ -403,36 +527,95 @@ export function CameraLabPage() {
     ctx.drawImage(video, 0, 0, detect.width, detect.height)
     const image = ctx.getImageData(0, 0, detect.width, detect.height)
     const gray = toGrayscale(image.data, detect.width, detect.height)
-    const found = detectBoard(gray, detect.width, detect.height)
-    if (!found) {
+
+    // Stage 1 — rough seed. The Hough accumulator grows with width × height ×
+    // radius bins, so at 1080p it would need hundreds of MB. On a 640-px frame
+    // it is a few MB and precise enough to say "the board is around here".
+    const ratio = Math.min(1, SEED_LONG_SIDE / Math.max(video.videoWidth, video.videoHeight))
+    const seedWidth = Math.round(video.videoWidth * ratio)
+    const seedHeight = Math.round(video.videoHeight * ratio)
+    const seedCanvas = document.createElement("canvas")
+    seedCanvas.width = seedWidth
+    seedCanvas.height = seedHeight
+    const seedCtx = seedCanvas.getContext("2d", { willReadFrequently: true })
+    if (!seedCtx) return
+    seedCtx.drawImage(video, 0, 0, seedWidth, seedHeight)
+    const seedImage = seedCtx.getImageData(0, 0, seedWidth, seedHeight)
+    const seedGray = toGrayscale(seedImage.data, seedWidth, seedHeight)
+    // A dartboard that fills ~47% of the frame width sits at ~0.1–0.3 of the
+    // short side; the wide bounds let the seed land on the rim or the surround.
+    const seedBoard = detectBoard(seedGray, seedWidth, seedHeight, {
+      minRadiusFraction: 0.05,
+      maxRadiusFraction: 0.6,
+    })
+    if (!seedBoard) {
       setError(
         "No board found in this frame — fill the frame with the board, improve the light, or calibrate by hand.",
       )
       return
     }
+
+    // Stage 2 — decide *which* circle that was. The Hough has no idea whether
+    // it locked onto the 170 mm double wire, the 225.5 mm rim or the black
+    // surround, and that choice is worth 7–30% of scale. The four-wire
+    // fingerprint is unambiguous, so fit centre and radius on the full
+    // detection frame, where 1 mm is about one pixel.
+    const toDetect = detect.width / seedWidth
+    const refined = refineBoard(gray, detect.width, detect.height, {
+      center: { x: seedBoard.center.x * toDetect, y: seedBoard.center.y * toDetect },
+      radius: seedBoard.radius * toDetect,
+    })
+    const found = refined
+      ? { ...refined, ringMm: BOARD.doubleOuter }
+      : {
+          center: {
+            x: seedBoard.center.x * toDetect,
+            y: seedBoard.center.y * toDetect,
+          },
+          radius: seedBoard.radius * toDetect,
+          confidence: seedBoard.confidence,
+          ringMm: AUTO_RING_MM,
+        }
+
     // Convert detection-canvas pixels to the video's intrinsic pixels.
     const scale = video.videoWidth / detect.width
     pendingBoardRef.current = {
       center: { x: found.center.x * scale, y: found.center.y * scale },
       radius: found.radius * scale,
       confidence: found.confidence,
+      ringMm: found.ringMm,
     }
     setPendingConfidence(found.confidence)
     setManual(false)
-    setError(null)
-    setMode("rotation")
 
     // Frame the board for the user: the tap on the double 20 is much easier
     // when the numbers are readable. Still adjustable with the slider.
     const pending = pendingBoardRef.current
-    if (pending) {
-      applyViewport(
-        autoFrame(pending.center, pending.radius, video.videoWidth, video.videoHeight),
-        video.videoWidth,
-        video.videoHeight,
-      )
-    }
-  }, [applyViewport])
+    applyViewport(
+      autoFrame(pending.center, pending.radius, video.videoWidth, video.videoHeight),
+      video.videoWidth,
+      video.videoHeight,
+    )
+
+    // The board's apparent size is compared with the shorter side of the
+    // frame. Below ~35% the ring edges are too coarse for the model to be
+    // trustworthy, and that is exactly when the detector used to lock onto
+    // the surround or the wall.
+    const shorter = Math.min(video.videoWidth, video.videoHeight)
+    const percent = Math.round(((pending.radius * 2) / shorter) * 100)
+    setBoardSizePercent(percent)
+
+    // Draw the full model immediately, with the 20 at the top. The user only
+    // corrects it if it is visibly off — detect, then confirm.
+    boardScaleRef.current = 1
+    setBoardScale(1)
+    pendingAngleRef.current = -90
+    applyPendingModel(1, -90)
+    setMode("rotation")
+
+    // The size is surfaced as its own warning rather than an error, because
+    // the size slider below can still rescue the calibration.
+  }, [applyPendingModel, applyViewport])
 
   const handleTap = useCallback(
     (point: Point) => {
@@ -451,20 +634,12 @@ export function CameraLabPage() {
       if (modeRef.current === "rotation") {
         const pending = pendingBoardRef.current
         if (!pending) return
-        // The tap marks the middle of the 20 double; that fixes the rotation.
-        const angle = Math.atan2(point.y - pending.center.y, point.x - pending.center.x)
-        const radiusPx = pending.radius * (MANUAL_RING_MM / AUTO_RING_MM)
-        const pixels: Point[] = [0, 90, 180, 270].map((offset) => {
-          const radians = angle + (offset * Math.PI) / 180
-          return {
-            x: pending.center.x + radiusPx * Math.cos(radians),
-            y: pending.center.y + radiusPx * Math.sin(radians),
-          }
-        })
-        pendingBoardRef.current = null
-        setPendingConfidence(null)
-        setTapCount(4)
-        applyCalibration(pixels)
+        // The tap marks the middle of the double 20; that fixes the rotation.
+        // The model stays a preview so the size slider keeps working.
+        const angle = (Math.atan2(point.y - pending.center.y, point.x - pending.center.x) * 180) / Math.PI
+        pendingAngleRef.current = angle
+        setRotationDeg(Math.round(angle))
+        applyPendingModel(boardScaleRef.current, angle)
         return
       }
 
@@ -484,7 +659,7 @@ export function CameraLabPage() {
         discarded: false,
       })
     },
-    [applyCalibration, pushRecord, speakLabel],
+    [applyPendingModel, applyCalibration, pushRecord, speakLabel],
   )
 
   const canvasPoint = useCallback((event: React.PointerEvent<HTMLCanvasElement>): Point => {
@@ -534,11 +709,13 @@ export function CameraLabPage() {
 
       if (pointersRef.current.size === 1) {
         gestureRef.current = beginPan(point, false)
+        if (modeRef.current !== "live") loupeRef.current = point
         return
       }
 
       if (pointersRef.current.size === 2) {
         const [a, b] = [...pointersRef.current.values()]
+        loupeRef.current = null
         const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
         const video = videoRef.current
         const crop = cropFor(viewportRef.current, video?.videoWidth ?? 0, video?.videoHeight ?? 0)
@@ -568,6 +745,13 @@ export function CameraLabPage() {
       pointersRef.current.set(event.pointerId, point)
       const width = video.videoWidth
       const height = video.videoHeight
+
+      // While calibrating, dragging aims instead of moving the picture: the
+      // finger stays over the target and the magnifier shows where it will land.
+      if (modeRef.current !== "live" && pointersRef.current.size === 1) {
+        loupeRef.current = point
+        return
+      }
 
       if (gesture.kind === "pinch" && pointersRef.current.size >= 2) {
         const [a, b] = [...pointersRef.current.values()]
@@ -612,6 +796,18 @@ export function CameraLabPage() {
       const gesture = gestureRef.current
       gestureRef.current = null
 
+      // Calibration taps are accepted even after the finger slides, because
+      // sliding is how the user aims with the magnifier.
+      if (modeRef.current !== "live") {
+        loupeRef.current = null
+        const video = videoRef.current
+        if (gesture?.kind === "pan" && video && video.videoWidth > 0) {
+          const crop = cropFor(viewportRef.current, video.videoWidth, video.videoHeight)
+          handleTap(screenToVideo(point, crop, canvas.width, canvas.height))
+        }
+        return
+      }
+
       // One finger lifted while another is still down: keep panning with it.
       if (pointersRef.current.size === 1) {
         const remaining = [...pointersRef.current.values()][0]
@@ -632,6 +828,7 @@ export function CameraLabPage() {
   const handlePointerCancel = useCallback(() => {
     pointersRef.current.clear()
     gestureRef.current = null
+    loupeRef.current = null
   }, [])
 
   // Render + detection loop. Restarts when the calibration or the model
@@ -723,20 +920,26 @@ export function CameraLabPage() {
         return
       }
 
-      const mask = differenceMask(gray, background, sensitivityRef.current)
+      // Phones re-expose continuously; without this a small brightness shift
+      // flips large areas of the frame and looks like a hundred new darts.
+      // The reference is shifted to the current mean before comparing.
+      const bias = meanLuma(gray) - backgroundMeanRef.current
+      const mask = differenceMask(gray, background, sensitivityRef.current, bias)
       const ratio = changedRatio(mask)
 
-      // A hand or an arm crossing the frame invalidates the difference.
+      // A hand or an arm crossing the frame invalidates this frame, but the
+      // darts already logged stay logged: clearing them used to re-record
+      // every dart still in the board as soon as the arm moved out.
       if (ratio > 0.08) {
-        dartsRef.current = []
+        lastDurationRef.current = performance.now() - started
         return
       }
 
       const scale = video.videoWidth / detect.width
       const blobs = connectedComponents(mask, detect.width, detect.height, {
-        minArea: 24,
-        maxArea: 6000,
-        minLength: 10,
+        minArea: 40,
+        maxArea: 12_000,
+        minLength: 18,
       })
 
       const next: DetectedDart[] = []
@@ -745,10 +948,17 @@ export function CameraLabPage() {
           x: endpoint.x * scale,
           y: endpoint.y * scale,
         }))
-        const scores = endpoints.map((endpoint) => scoreAtPoint(applyHomography(h, endpoint)))
+        const aMm = applyHomography(h, endpoints[0])
+        const bMm = applyHomography(h, endpoints[1])
+        const lengthMm = distance(aMm, bMm)
 
-        // Both ends off the board means an arm, a chair or the wall — not a
-        // dart. Dropping these keeps the session log readable.
+        // A real dart is 120–180 mm long and cannot be longer than the board.
+        // That single test removes most shadows, reflections and edges of the
+        // surround, which were the bulk of the false detections.
+        if (!Number.isFinite(lengthMm) || lengthMm < 70 || lengthMm > 320) continue
+
+        const scores = [scoreAtPoint(aMm), scoreAtPoint(bMm)]
+        // Both tips off the board means an arm, a chair or the wall.
         if (scores.every((score) => score.ring === "miss")) continue
 
         const previous = dartsRef.current.find(
@@ -757,26 +967,41 @@ export function CameraLabPage() {
             Math.hypot(dart.b.x - endpoints[1].x, dart.b.y - endpoints[1].y) < 24 * scale,
         )
 
-        const age = (previous?.age ?? 0) + 1
-        if (age === 3) {
-          speakLabel(scores[0].label)
-          pushRecord({
-            id: crypto.randomUUID(),
-            at: new Date().toISOString(),
-            method: "auto",
-            candidateA: scores[0].label,
-            candidateB: scores[1].label,
-            chosen: null,
-            discarded: false,
-          })
-        }
-
         next.push({
           a: endpoints[0],
           b: endpoints[1],
           scoreA: scores[0],
           scoreB: scores[1],
-          age,
+          aMm,
+          bMm,
+          lengthMm,
+          age: (previous?.age ?? 0) + 1,
+        })
+      }
+
+      // At most one new dart per frame, after a cooldown, and never the same
+      // dart twice: three frames of stability only prove it is still there.
+      let recorded = false
+      for (const dart of next) {
+        if (recorded || dart.age !== 3) continue
+        if (now - lastRecordAtRef.current < RECORD_COOLDOWN_MS) continue
+        if (knownDartsRef.current.some((known) => isSameDart(dart.aMm, dart.bMm, known))) continue
+
+        knownDartsRef.current.push({ aMm: dart.aMm, bMm: dart.bMm })
+        lastRecordAtRef.current = now
+        recorded = true
+        speakLabel(dart.scoreA.label)
+        pushRecord({
+          id: crypto.randomUUID(),
+          at: new Date().toISOString(),
+          method: "auto",
+          candidateA: dart.scoreA.label,
+          candidateB: dart.scoreB.label,
+          chosen: null,
+          discarded: false,
+          aMm: dart.aMm,
+          bMm: dart.bMm,
+          lengthMm: Math.round(dart.lengthMm),
         })
       }
 
@@ -893,6 +1118,55 @@ export function CameraLabPage() {
         }
       }
 
+      // Magnifier: tapping a 8 mm double at arm's length on a mounted phone is
+      // hopeless without it. Shown while calibrating, drawn from the frame
+      // under the finger, on the opposite side so the hand never hides it.
+      const loupe = loupeRef.current
+      if (loupe && modeRef.current !== "live") {
+        const source = screenToVideo(loupe, crop, canvas.width, canvas.height)
+        const radius = Math.min(canvas.width, canvas.height) * 0.17
+        const margin = radius * 1.12
+        const centre = { x: loupe.x < canvas.width / 2 ? canvas.width - margin : margin, y: margin }
+        const magnification = 8
+        const half = radius / magnification
+
+        ctx.save()
+        ctx.beginPath()
+        ctx.arc(centre.x, centre.y, radius, 0, Math.PI * 2)
+        ctx.clip()
+        ctx.fillStyle = "#020617"
+        ctx.fillRect(centre.x - radius, centre.y - radius, radius * 2, radius * 2)
+        ctx.drawImage(
+          video,
+          source.x - half,
+          source.y - half,
+          half * 2,
+          half * 2,
+          centre.x - radius,
+          centre.y - radius,
+          radius * 2,
+          radius * 2,
+        )
+        ctx.strokeStyle = "rgba(56, 189, 248, 0.95)"
+        ctx.lineWidth = Math.max(1.5, radius / 45)
+        ctx.beginPath()
+        ctx.moveTo(centre.x - radius * 0.28, centre.y)
+        ctx.lineTo(centre.x + radius * 0.28, centre.y)
+        ctx.moveTo(centre.x, centre.y - radius * 0.28)
+        ctx.lineTo(centre.x, centre.y + radius * 0.28)
+        ctx.stroke()
+        ctx.restore()
+
+        ctx.strokeStyle = "rgba(56, 189, 248, 0.85)"
+        ctx.lineWidth = Math.max(2, canvas.width / 500)
+        ctx.beginPath()
+        ctx.arc(centre.x, centre.y, radius, 0, Math.PI * 2)
+        ctx.stroke()
+        ctx.beginPath()
+        ctx.arc(loupe.x, loupe.y, Math.max(6, canvas.width / 120), 0, Math.PI * 2)
+        ctx.stroke()
+      }
+
       if (modeRef.current === "live" && backgroundRef.current) detectDarts(now)
 
       frameTimesRef.current.push(now)
@@ -956,6 +1230,16 @@ export function CameraLabPage() {
       calibration: {
         points: calibrationPxRef.current,
         mmPerPx: hud.mmPerPx,
+        boardSizePercent,
+        rotationDeg,
+        boardScale,
+        accepted: calibrated,
+      },
+      detection: {
+        sensitivity,
+        detectWidth: detectCanvasRef.current?.width ?? 0,
+        cooldownMs: RECORD_COOLDOWN_MS,
+        sameDartMm: SAME_DART_MM,
       },
       zoom: viewport.zoom,
       summary: {
@@ -1090,10 +1374,12 @@ export function CameraLabPage() {
           {stepIndex === 2 && (
             <>
               Board found
-              {pendingConfidence ? ` (${Math.round(pendingConfidence * 100)}% confident)` : ""} and zoomed in on
-              it. With your finger, tap the{" "}
-              <strong className="text-foreground">middle of the double 20 on this screen</strong> — the blue “20”
-              marks it. You touch the image, never the physical board.
+              {pendingConfidence ? ` (${Math.round(pendingConfidence * 100)}% confident)` : ""} and the blue ring
+              lines are drawn on it. Check that they sit on the wires: nudge{" "}
+              <strong className="text-foreground">Board size</strong> first, then tap the{" "}
+              <strong className="text-foreground">middle of the double 20 on this screen</strong> (a magnifier
+              follows your finger) to fix the rotation. You touch the image, never the physical board. Happy with
+              it? Tap “Looks right”.
             </>
           )}
           {stepIndex === 3 &&
@@ -1105,6 +1391,13 @@ export function CameraLabPage() {
       </div>
 
       {error && <p className="text-sm text-destructive">{error}</p>}
+
+      {boardSizePercent !== null && boardSizePercent < 35 && (
+        <p className="text-sm text-amber-500">
+          The board fills only {boardSizePercent}% of the frame. Move the phone (or zoom) so it fills most of the
+          picture: at this size the ring lines are approximate and a dart can be off by a whole segment.
+        </p>
+      )}
 
       <div className="flex flex-col gap-2">
         {stepIndex === 0 && (
@@ -1118,9 +1411,49 @@ export function CameraLabPage() {
           </Button>
         )}
         {stepIndex === 2 && (
-          <Button className="min-h-12" variant="outline" disabled>
-            <MousePointerClick /> Tap the double 20 above
-          </Button>
+          <div className="flex flex-col gap-3 rounded-lg border border-border p-3">
+            <label className="flex items-center gap-2 text-sm">
+              <span className="w-20 shrink-0">Board size</span>
+              <input
+                type="range"
+                min={0.6}
+                max={1.8}
+                step={0.01}
+                value={boardScale}
+                onChange={(event) => {
+                  const value = Number(event.target.value)
+                  boardScaleRef.current = value
+                  setBoardScale(value)
+                  applyPendingModel(value, pendingAngleRef.current)
+                }}
+                className="min-w-0 flex-1 accent-sky-500"
+                aria-label="Board size"
+              />
+              <span className="w-10 shrink-0 text-right tabular-nums">{boardScale.toFixed(2)}×</span>
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <span className="w-20 shrink-0">Rotation</span>
+              <input
+                type="range"
+                min={-180}
+                max={180}
+                step={1}
+                value={rotationDeg}
+                onChange={(event) => {
+                  const value = Number(event.target.value)
+                  pendingAngleRef.current = value
+                  setRotationDeg(value)
+                  applyPendingModel(boardScaleRef.current, value)
+                }}
+                className="min-w-0 flex-1 accent-sky-500"
+                aria-label="Rotation"
+              />
+              <span className="w-10 shrink-0 text-right tabular-nums">{rotationDeg}°</span>
+            </label>
+            <Button className="min-h-12" onClick={acceptPendingModel}>
+              <Check /> Looks right — continue
+            </Button>
+          </div>
         )}
         {(stepIndex === 3 || stepIndex === 4) && (
           <Button
@@ -1218,6 +1551,13 @@ export function CameraLabPage() {
         <span>{hud.fps} fps</span>
         <span>{hud.ms.toFixed(0)} ms/frame</span>
         <span>{hud.mmPerPx ? `${hud.mmPerPx.toFixed(2)} mm/px` : "not calibrated"}</span>
+        {boardSizePercent !== null && <span>board {boardSizePercent}% of frame</span>}
+        {phase === "live" && wakeLock === "on" && (
+          <span className="text-emerald-500">screen stays on</span>
+        )}
+        {phase === "live" && (wakeLock === "denied" || wakeLock === "unsupported") && (
+          <span className="text-amber-500">screen may sleep — check display settings</span>
+        )}
         {lastScore && <span>last tap: {lastScore.score.label}</span>}
       </div>
 

@@ -176,7 +176,7 @@ function bilinear(field: Float32Array, width: number, height: number, x: number,
   return top * (1 - fy) + bottom * fy
 }
 
-/** Mean edge magnitude along the circle, sampled at 180 points. */
+/** Mean edge magnitude along the circle. */
 function ringScore(
   magnitude: Float32Array,
   width: number,
@@ -184,8 +184,8 @@ function ringScore(
   cx: number,
   cy: number,
   radius: number,
+  samples = 180,
 ): number {
-  const samples = 180
   let sum = 0
   for (let s = 0; s < samples; s++) {
     const angle = (s / samples) * Math.PI * 2
@@ -377,6 +377,275 @@ function snapToWirePair(
   if (separation < 2.5 || separation > 20) return radius
 
   return radius + (first.offset + second.offset) / 2
+}
+
+/** Edge magnitude only; the Hough needs the direction too, this does not.
+ * Optionally only over `region`, in absolute frame coordinates. */
+function magnitudeField(
+  gray: Uint8ClampedArray,
+  width: number,
+  height: number,
+  region?: { x: number; y: number; width: number; height: number },
+): Float32Array {
+  const x0 = region ? region.x : 0
+  const y0 = region ? region.y : 0
+  const w = region ? region.width : width
+  const h = region ? region.height : height
+  const magnitude = new Float32Array(w * h)
+  for (let y = 0; y < h; y++) {
+    const ay = y0 + y
+    if (ay < 1 || ay >= height - 1) continue
+    for (let x = 0; x < w; x++) {
+      const ax = x0 + x
+      if (ax < 1 || ax >= width - 1) continue
+      const i = ay * width + ax
+      const dx =
+        gray[i - width + 1] + 2 * gray[i + 1] + gray[i + width + 1] -
+        (gray[i - width - 1] + 2 * gray[i - 1] + gray[i + width - 1])
+      const dy =
+        gray[i + width - 1] + 2 * gray[i + width] + gray[i + width + 1] -
+        (gray[i - width - 1] + 2 * gray[i - width] + gray[i - width + 1])
+      magnitude[y * w + x] = Math.hypot(dx, dy)
+    }
+  }
+  return magnitude
+}
+
+/**
+ * Radii of the four scoring wires, in mm. Their *ratio pattern* is a
+ * fingerprint: a lamp, a wall edge or the board's own surround can look like
+ * one circle, but nothing in a room has four concentric rings at 1, 0.95,
+ * 0.63 and 0.58 of its radius. That is what tells the 170 mm double ring
+ * apart from the 225.5 mm rim and from the black surround behind the board.
+ */
+const RING_FINGERPRINT_MM = [170, 162, 107, 99]
+
+function fingerprintScore(
+  magnitude: Float32Array,
+  width: number,
+  height: number,
+  cx: number,
+  cy: number,
+  radius: number,
+  samples: number,
+): number {
+  const scale = radius / 170
+  let sum = 0
+  for (const mm of RING_FINGERPRINT_MM) {
+    sum += ringScore(magnitude, width, height, cx, cy, scale * mm, samples)
+  }
+  return sum / RING_FINGERPRINT_MM.length
+}
+
+export interface BoardSeed {
+  center: Point
+  /** Rough radius of *some* board circle (double ring, rim or surround). */
+  radius: number
+}
+
+/**
+ * Turn a rough guess into the board's real centre and double-ring radius.
+ *
+ * The Hough pass is good at "there is a circle here" and poor at "which circle
+ * is the 170 mm one": on a real phone it locks onto the surround or the rim,
+ * which puts every ring 20–45% off. This refines centre and radius together by
+ * matching the four-wire fingerprint, which is unambiguous.
+ *
+ * Runs at the caller's resolution (call it on the full detection frame, not on
+ * the small search frame) because 1 mm is about one pixel there.
+ */
+export function refineBoard(
+  gray: Uint8ClampedArray,
+  width: number,
+  height: number,
+  seed: BoardSeed,
+): DetectedBoard | null {
+  if (!(seed.radius > 4)) return null
+  const shorter = Math.min(width, height)
+
+  // The seed may be the double ring, the rim or the surround; search a band
+  // that contains all three readings of it.
+  const minRadius = Math.max(10, seed.radius * 0.5)
+  const maxRadius = Math.min(shorter * 0.62, seed.radius * 1.3)
+  if (maxRadius <= minRadius) return null
+
+  // A fixed budget for the coarse pass: 33 × 33 centres × ~48 radii. The hill
+  // climb afterwards covers any distance the coarser grid skipped.
+  const span = Math.max(24, seed.radius * 0.32)
+  const step = Math.max(2, (span * 2) / 32)
+  const radiusStep = Math.max(1.5, (maxRadius - minRadius) / 48)
+
+  // Only the band around the board can be sampled, so the gradient field is
+  // built for that box alone: on a 1080p frame that is ~10× less work than the
+  // whole buffer, and the difference between a smooth tap and a visible stall.
+  const pad = Math.ceil(span + maxRadius + 8)
+  const left = Math.max(0, Math.floor(seed.center.x - pad))
+  const top = Math.max(0, Math.floor(seed.center.y - pad))
+  const right = Math.min(width, Math.ceil(seed.center.x + pad))
+  const bottom = Math.min(height, Math.ceil(seed.center.y + pad))
+  const boxWidth = right - left
+  const boxHeight = bottom - top
+  if (boxWidth < 24 || boxHeight < 24) return null
+  const magnitude = magnitudeField(gray, width, height, {
+    x: left,
+    y: top,
+    width: boxWidth,
+    height: boxHeight,
+  })
+
+  // Everything below works in box coordinates.
+  const originX = seed.center.x - left
+  const originY = seed.center.y - top
+  const fieldWidth = boxWidth
+  const fieldHeight = boxHeight
+  const fieldShorter = Math.min(boxWidth, boxHeight)
+
+  let cx = originX
+  let cy = originY
+  let radius = seed.radius
+  let best = -1
+
+  for (let y = originY - span; y <= originY + span; y += step) {
+    for (let x = originX - span; x <= originX + span; x += step) {
+      for (let r = minRadius; r <= maxRadius; r += radiusStep) {
+        const score = fingerprintScore(magnitude, fieldWidth, fieldHeight, x, y, r, 24)
+        if (score > best) {
+          best = score
+          cx = x
+          cy = y
+          radius = r
+        }
+      }
+    }
+  }
+  if (best <= 0) return null
+
+  // Hill climb on all three parameters, then a finer pass. Best ascent (all
+  // ten neighbours each round) rather than first ascent: the fingerprint is
+  // noisy enough that stopping at the first improvement strands the search on
+  // the wrong side of a doublet.
+  for (let par = 2; par >= 0.25; par /= 2) {
+    let improved = true
+    while (improved) {
+      improved = false
+      let bestScore = fingerprintScore(magnitude, fieldWidth, fieldHeight, cx, cy, radius, 180)
+      let moveX = 0
+      let moveY = 0
+      let moveR = 0
+      for (const [dx, dy, dr] of [
+        [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0],
+        [0, 0, 1], [0, 0, -1], [1, 1, 0], [-1, -1, 0], [1, -1, 0], [-1, 1, 0],
+      ]) {
+        const nx = cx + dx * par
+        const ny = cy + dy * par
+        const nr = radius + dr * par
+        if (nr < 8 || nr > fieldShorter * 0.7) continue
+        if (nx < 0 || ny < 0 || nx >= fieldWidth || ny >= fieldHeight) continue
+        const score = fingerprintScore(magnitude, fieldWidth, fieldHeight, nx, ny, nr, 180)
+        if (score > bestScore) {
+          bestScore = score
+          moveX = dx
+          moveY = dy
+          moveR = dr
+          improved = true
+        }
+      }
+      if (improved) {
+        cx += moveX * par
+        cy += moveY * par
+        radius += moveR * par
+      }
+    }
+  }
+
+  // Confidence: how much of the double ring sits on a real edge, relative to
+  // the strongest part of that same ring (so lighting does not matter).
+  const samples = 360
+  const peaks: number[] = []
+  for (let s = 0; s < samples; s++) {
+    const angle = (s / samples) * Math.PI * 2
+    const cos = Math.cos(angle)
+    const sin = Math.sin(angle)
+    let peak = 0
+    for (let offset = -1.5; offset <= 1.5; offset += 0.5) {
+      const value = bilinear(
+        magnitude,
+        fieldWidth,
+        fieldHeight,
+        cx + (radius + offset) * cos,
+        cy + (radius + offset) * sin,
+      )
+      if (value > peak) peak = value
+    }
+    peaks.push(peak)
+  }
+  const sorted = [...peaks].sort((a, b) => a - b)
+  const median = sorted[Math.floor(sorted.length / 2)]
+  const covered = peaks.filter((value) => value >= median * 0.5).length
+
+  // The wires read as two gradient edges with a flat middle, so the peak can
+  // sit on either edge (±1–2 px ≈ 1% of the radius). Average the four ring
+  // profiles and use the midpoint of the edge pair, which is the wire.
+  radius = wireCentre(magnitude, fieldWidth, fieldHeight, cx, cy, radius)
+
+  return {
+    center: { x: cx + left, y: cy + top },
+    radius,
+    confidence: covered / samples,
+  }
+}
+
+/**
+ * Sub-pixel radius polish. Each painted line has two gradient edges, so the
+ * fingerprint maximum is a doublet; averaging it puts the answer between them,
+ * on the wire rather than on one of its sides.
+ */
+function wireCentre(
+  magnitude: Float32Array,
+  width: number,
+  height: number,
+  cx: number,
+  cy: number,
+  radius: number,
+): number {
+  const offsets: number[] = []
+  for (let offset = -4; offset <= 4; offset += 0.25) offsets.push(offset)
+  const profile = offsets.map((offset) =>
+    fingerprintScore(magnitude, width, height, cx, cy, radius + offset, 240),
+  )
+
+  const peak = Math.max(...profile)
+  if (!(peak > 0)) return radius
+
+  const maxima: { offset: number; value: number }[] = []
+  for (let i = 1; i < profile.length - 1; i++) {
+    if (profile[i] >= profile[i - 1] && profile[i] >= profile[i + 1] && profile[i] >= peak * 0.5) {
+      maxima.push({ offset: offsets[i], value: profile[i] })
+    }
+  }
+  maxima.sort((a, b) => b.value - a.value)
+  if (maxima.length < 2) return radius
+
+  // The two strongest edges of the same wire: close together, one on each side
+  // of the current radius. A wire pair gap (8 mm ≈ 6+ px at this scale) is
+  // therefore not mistaken for the two sides of one wire.
+  const first = maxima[0]
+  for (let i = 1; i < maxima.length; i++) {
+    const second = maxima[i]
+    const separation = Math.abs(second.offset - first.offset)
+    if (separation < 0.75 || separation > 5) continue
+    if (Math.sign(second.offset - first.offset) === Math.sign(first.offset)) continue
+    return radius + (first.offset + second.offset) / 2
+  }
+
+  // Single resolved edge: use the parabola vertex instead of the grid point.
+  const index = offsets.indexOf(first.offset)
+  const left = profile[index - 1]
+  const centre = profile[index]
+  const right = profile[index + 1]
+  const denominator = left - 2 * centre + right
+  const shift = denominator === 0 ? 0 : (0.25 * (left - right)) / denominator
+  return radius + first.offset + shift
 }
 
 /** Algebraic circle fit (Kasa): minimises sum (x^2+y^2+Dx+Ey+F)^2. */

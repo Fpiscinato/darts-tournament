@@ -15,15 +15,33 @@ export function toGrayscale(rgba: Uint8ClampedArray, width: number, height: numb
   return gray
 }
 
-/** 1 where the absolute difference exceeds `threshold`, 0 elsewhere. */
+/** Mean luminance, used to compensate camera auto-exposure between frames. */
+export function meanLuma(gray: Uint8ClampedArray): number {
+  const stride = Math.max(1, Math.floor(gray.length / 20_000))
+  let sum = 0
+  let count = 0
+  for (let i = 0; i < gray.length; i += stride) {
+    sum += gray[i]
+    count += 1
+  }
+  return count === 0 ? 0 : sum / count
+}
+
+/** 1 where the absolute difference exceeds `threshold`, 0 elsewhere.
+ *
+ * `bias` is added to `b` before comparing: a phone camera continuously
+ * re-exposes, and without this a small brightness shift flips large areas of
+ * the frame and looks exactly like a hundred new darts.
+ */
 export function differenceMask(
   a: Uint8ClampedArray,
   b: Uint8ClampedArray,
   threshold: number,
+  bias = 0,
 ): Uint8Array {
   const mask = new Uint8Array(a.length)
   for (let i = 0; i < a.length; i++) {
-    mask[i] = Math.abs(a[i] - b[i]) >= threshold ? 1 : 0
+    mask[i] = Math.abs(a[i] - (b[i] + bias)) >= threshold ? 1 : 0
   }
   return mask
 }
