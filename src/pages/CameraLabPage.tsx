@@ -1091,14 +1091,15 @@ export function CameraLabPage() {
             <>
               Board found
               {pendingConfidence ? ` (${Math.round(pendingConfidence * 100)}% confident)` : ""} and zoomed in on
-              it. Now tap the <strong className="text-foreground">middle of the double 20</strong> — the segment at
-              the top of the board, on the image above.
+              it. With your finger, tap the{" "}
+              <strong className="text-foreground">middle of the double 20 on this screen</strong> — the blue “20”
+              marks it. You touch the image, never the physical board.
             </>
           )}
           {stepIndex === 3 &&
             "Take every dart off the board, then tap “Board is empty”. The detector compares each frame against this reference."}
           {stepIndex === 4 &&
-            "Throw. Each dart is spoken out loud and logged. Pick A or B (which tip is the point) or Discard. After pulling the darts out, tap “Board is empty” again to reset the round."}
+            "Throw real darts at the board — the camera detects them, you do not tap anything. Each dart is spoken out loud and logged; just tap A or B (which tip is the point) or Discard on this screen. After pulling the darts out, tap “Board is empty” again."}
         </p>
         {manual && <p className="mt-1 text-sm text-muted-foreground">Next: double {calibratingTarget}</p>}
       </div>
